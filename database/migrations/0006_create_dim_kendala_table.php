@@ -9,14 +9,29 @@ return new class extends Migration
     public function up(): void
     {
         if (! Schema::hasTable('dim_kendala')) {
+
             Schema::create('dim_kendala', function (Blueprint $table) {
-            $table->id();
-            $table->string('kode_kendala', 100)->nullable()->unique();
-            $table->string('nama_kendala', 191);
-            $table->string('kategori', 100)->nullable();
-            $table->string('sub_kategori', 100)->nullable();
-            $table->timestamps();
-        });
+
+                $table->id();
+
+                $table->string('kategori_solusi', 150)->nullable();
+
+                $table->string('kategori_roc', 100)->nullable();
+
+                $table->text('kendala_pt1')->nullable();
+
+                $table->text('solusi_kendala')->nullable();
+
+                $table->text('solusi_maintenance')->nullable();
+
+                $table->text('solusi_optima')->nullable();
+
+                $table->text('solusi_sdi_daman')->nullable();
+
+                $table->longText('info_detail')->nullable();
+
+                $table->timestamps();
+            });
         }
     }
 

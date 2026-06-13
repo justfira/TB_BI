@@ -10,6 +10,7 @@
         "dompdf/dompdf": "2.0.*",
         "laravel/framework": "^12.0",
         "laravel/tinker": "^2.10.1",
+        "openspout/openspout": "4.23",
         "phpoffice/phpspreadsheet": "1.30.*"
     },
     "require-dev": {

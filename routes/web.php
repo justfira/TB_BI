@@ -12,11 +12,13 @@ Route::get('/', fn() => redirect()->route('dashboard.index'));
 Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard.index');
 
 // ── Import / ETL ──────────────────────────────────────────────────────────────
+
 Route::prefix('import')->name('import.')->group(function () {
     Route::get('/',            [EtlController::class, 'showImport'])->name('index');
     Route::post('/preview',    [EtlController::class, 'preview'])->name('preview');
     Route::post('/process',    [EtlController::class, 'process'])->name('process');
     Route::get('/result/{id}', [EtlController::class, 'result'])->name('result');
+    Route::get('/status/{id}', [EtlController::class, 'status'])->name('status');
 });
 
 // ── Laporan ───────────────────────────────────────────────────────────────────

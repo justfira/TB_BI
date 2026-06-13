@@ -9,15 +9,25 @@ return new class extends Migration
     public function up(): void
     {
         if (! Schema::hasTable('dim_teknisi')) {
+
             Schema::create('dim_teknisi', function (Blueprint $table) {
-            $table->id();
-            $table->string('nama_teknisi', 191);
-            $table->string('nik', 100)->nullable()->unique();
-            $table->string('mitra', 150)->nullable();
-            $table->string('unit', 100)->nullable();
-            $table->string('role', 100)->nullable();
-            $table->timestamps();
-        });
+
+                $table->id();
+
+                $table->string('nik_teknisi', 100)->nullable()->unique();
+
+                $table->string('nama_teknisi', 191)->nullable();
+
+                $table->string('korlap', 150)->nullable();
+
+                $table->string('komandan_team', 150)->nullable();
+
+                $table->string('mitra', 150)->nullable();
+
+                $table->string('spv', 150)->nullable();
+
+                $table->timestamps();
+            });
         }
     }
 

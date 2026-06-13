@@ -13,12 +13,10 @@ class DimKendala extends Model
     protected $primaryKey = 'kendala_id';
 
     protected $fillable = [
-        'kode_kendala',
-        'nama_kendala',
-        'kategori',
-        'sub_kategori',
+        'kendala_pt1',
         'kategori_roc',
         'kategori_solusi',
+        'solusi_kendala',
         'keterangan',
     ];
 

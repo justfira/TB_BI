@@ -43,18 +43,18 @@ class DashboardController extends Controller
 
         // ── Chart & tabel ─────────────────────────────────────────────────────
         $statusDistribution = (clone $filtered)
-            ->selectRaw('status_id, count(*) as total')
-            ->groupBy('status_id')
+            ->selectRaw('dim_status_id, count(*) as total')
+            ->groupBy('dim_status_id')
             ->with('status')
             ->get()
             ->map(fn ($item) => [
-                'status' => optional($item->status)->status_wo ?? 'Unknown',
+                'status' => optional($item->status)->status_name ?? $item->status_wo ?? 'Unknown',
                 'total'  => $item->total,
             ]);
 
         $topSto = (clone $filtered)
-            ->selectRaw('sto_id, count(*) as total')
-            ->groupBy('sto_id')
+            ->selectRaw('dim_sto_id, count(*) as total')
+            ->groupBy('dim_sto_id')
             ->with('sto')
             ->orderByDesc('total')
             ->limit(8)
@@ -65,8 +65,8 @@ class DashboardController extends Controller
             ]);
 
         $topTeknisi = (clone $filtered)
-            ->selectRaw('teknisi_id, count(*) as total')
-            ->groupBy('teknisi_id')
+            ->selectRaw('dim_teknisi_id, count(*) as total')
+            ->groupBy('dim_teknisi_id')
             ->with('teknisi')
             ->orderByDesc('total')
             ->limit(8)
@@ -77,8 +77,8 @@ class DashboardController extends Controller
             ]);
 
         $topKendala = (clone $filtered)
-            ->selectRaw('kendala_id, count(*) as total')
-            ->groupBy('kendala_id')
+            ->selectRaw('dim_kendala_id, count(*) as total')
+            ->groupBy('dim_kendala_id')
             ->with('kendala')
             ->orderByDesc('total')
             ->limit(8)
@@ -90,10 +90,10 @@ class DashboardController extends Controller
 
         // Tren bulanan — join ke dim_waktu
         $chartTrend = (clone $filtered)
-            ->selectRaw('date_id, count(*) as total')
-            ->groupBy('date_id')
+            ->selectRaw('dim_waktu_id, count(*) as total')
+            ->groupBy('dim_waktu_id')
             ->with('waktu')
-            ->orderBy('date_id')
+            ->orderBy('dim_waktu_id')
             ->get()
             ->map(fn ($item) => [
                 'label' => optional($item->waktu)->nama_bulan . ' ' . optional($item->waktu)->tahun,
@@ -105,9 +105,9 @@ class DashboardController extends Controller
         $teknisiOptions  = DimTeknisi::orderBy('nama_teknisi')->get();
 
         // ── ETL status sidebar ────────────────────────────────────────────────
-        $pendingCount   = StagingWorkorder::where('status_etl', 'pending')->count();
-        $processedCount = StagingWorkorder::where('status_etl', 'processed')->count();
-        $failedCount    = StagingWorkorder::where('status_etl', 'failed')->count();
+        $pendingCount   = StagingWorkorder::where('status', 'pending')->count();
+        $processedCount = StagingWorkorder::where('status', 'processed')->count();
+        $failedCount    = StagingWorkorder::where('status', 'failed')->count();
         $latestEtlLog   = EtlLog::latest('imported_at')->first();
 
         return view('dashboard.index', compact(
@@ -144,19 +144,19 @@ class DashboardController extends Controller
         }
 
         if ($request->filled('sto')) {
-            $query->where('sto_id', $request->sto);
+            $query->where('dim_sto_id', $request->sto);
         }
 
         if ($request->filled('teknisi')) {
-            $query->where('teknisi_id', $request->teknisi);
+            $query->where('dim_teknisi_id', $request->teknisi);
         }
 
         if ($request->filled('status')) {
-            $query->whereHas('status', fn ($q) => $q->where('status_wo', $request->status));
+            $query->whereHas('status', fn ($q) => $q->where('status_name', $request->status));
         }
 
         if ($request->filled('kendala')) {
-            $query->where('kendala_id', $request->kendala);
+            $query->where('dim_kendala_id', $request->kendala);
         }
 
         return $query;

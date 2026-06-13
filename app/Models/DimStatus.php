@@ -17,6 +17,16 @@ class DimStatus extends Model
     protected $table = 'dim_status';
     protected $primaryKey = 'status_id';
 
+    protected $fillable = [
+        'status_wo',
+        'status_sc',
+        'status_name',
+        'status_group',
+        'status_final',
+        'kategori_status',
+        'aktif',
+    ];
+
     // Nilai status_group yang dipakai di seluruh aplikasi
     public const GROUP_SELESAI = 'Selesai';
     public const GROUP_PENDING = 'Pending';

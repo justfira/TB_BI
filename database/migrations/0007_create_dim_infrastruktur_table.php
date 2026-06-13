@@ -11,10 +11,21 @@ return new class extends Migration
         if (! Schema::hasTable('dim_infrastruktur')) {
             Schema::create('dim_infrastruktur', function (Blueprint $table) {
             $table->id();
-            $table->string('tipe_infrastruktur', 100);
-            $table->string('vendor', 100)->nullable();
-            $table->string('lokasi', 191)->nullable();
-            $table->string('nama_perangkat', 150)->nullable();
+            $table->string('odp')->nullable();
+            $table->string('odc')->nullable();
+            $table->string('gpon')->nullable();
+
+            $table->string('feeder')->nullable();
+            $table->string('distribusi')->nullable();
+            $table->string('core_distribusi')->nullable();
+
+            $table->string('datek1')->nullable();
+            $table->string('datek_inputan')->nullable();
+            $table->string('datek_real')->nullable();
+
+            $table->string('hasil_ukur_odp')->nullable();
+            $table->string('hasil_ukur_distribusi')->nullable();
+            $table->string('hasil_ukur_feeder')->nullable();
             $table->timestamps();
         });
         }

@@ -45,7 +45,7 @@
                 <select name="sto" class="form-select form-select-sm">
                     <option value="">Semua STO</option>
                     @foreach($stoOptions as $s)
-                        <option value="{{ $s->sto_id }}" {{ request('sto') == $s->sto_id ? 'selected' : '' }}>
+                        <option value="{{ $s->id }}" {{ request('sto') == $s->id ? 'selected' : '' }}>
                             {{ $s->nama_sto }}
                         </option>
                     @endforeach
@@ -56,7 +56,7 @@
                 <select name="teknisi" class="form-select form-select-sm">
                     <option value="">Semua Teknisi</option>
                     @foreach($teknisiOptions as $t)
-                        <option value="{{ $t->teknisi_id }}" {{ request('teknisi') == $t->teknisi_id ? 'selected' : '' }}>
+                        <option value="{{ $t->id }}" {{ request('teknisi') == $t->id ? 'selected' : '' }}>
                             {{ $t->nama_teknisi }}
                         </option>
                     @endforeach

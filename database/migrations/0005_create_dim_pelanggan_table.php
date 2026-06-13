@@ -9,15 +9,29 @@ return new class extends Migration
     public function up(): void
     {
         if (! Schema::hasTable('dim_pelanggan')) {
+
             Schema::create('dim_pelanggan', function (Blueprint $table) {
-            $table->id();
-            $table->string('nama_pelanggan', 191);
-            $table->string('kode_pelanggan', 100)->nullable()->unique();
-            $table->string('tipe_pelanggan', 100)->nullable();
-            $table->string('region', 100)->nullable();
-            $table->string('alamat', 255)->nullable();
-            $table->timestamps();
-        });
+
+                $table->id();
+
+                $table->string('k_contact', 255)->nullable()->unique();
+
+                $table->string('nama_pelanggan', 255)->nullable();
+
+                $table->string('cp', 100)->nullable();
+
+                $table->string('segment', 100)->nullable();
+
+                $table->string('layanan', 150)->nullable();
+
+                $table->string('uic', 100)->nullable();
+
+                $table->text('alamat_instalasi')->nullable();
+
+                $table->string('koordinat_pelanggan', 255)->nullable();
+
+                $table->timestamps();
+            });
         }
     }
 
