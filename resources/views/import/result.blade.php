@@ -193,7 +193,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (title) {
             title.textContent = data.status === 'queued'
                 ? 'Menunggu worker memproses...'
-                : `ETL berjalan... (${formatNumber(data.success_count)} baris berhasil)`;
+                : 'ETL berjalan...';
         }
     }
 
@@ -214,9 +214,9 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
 
-    // Poll pertama langsung, lalu tiap 3 detik
+    // Poll pertama langsung, lalu tiap 8 detik (lebih jarang biar endpoint tidak dipukul terus)
     poll();
-    pollInterval = setInterval(poll, 3000);
+    pollInterval = setInterval(poll, 8000);
 });
 </script>
 @endpush

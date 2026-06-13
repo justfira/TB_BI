@@ -111,6 +111,7 @@ class DashboardController extends Controller
         $latestEtlLog   = EtlLog::latest('imported_at')->first();
 
         return view('dashboard.index', compact(
+
             'totalWorkorder',
             'totalSelesai',
             'totalPending',

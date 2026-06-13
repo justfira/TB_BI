@@ -78,8 +78,90 @@
         </div>
     </div>
 
-    {{-- ── Sidebar Info ────────────────────────────────────────────────── --}}
+{{-- ── Histori Proses ETL ───────────────────────────────────────── --}}
+<div class="card panel-card mt-4">
+    <div class="card-header d-flex align-items-center justify-content-between gap-2">
+        <span>Histori Proses ETL</span>
+        <div class="d-flex align-items-center gap-2">
+            @if(isset($etlLogs) && $etlLogs->total() > 0)
+                <span class="badge bg-secondary">{{ $etlLogs->total() }} batch</span>
+            @endif
+            {{-- Hapus full database hasil ETL (works hanya jika endpoint tersedia) --}}
+            <form action="{{ route('import.history.destroy', 0) }}" method="POST" onsubmit="return confirm('Hapus ALL data hasil ETL dari database? Ini tidak bisa dibatalkan.');">
+                @csrf
+                @method('DELETE')
+                <input type="hidden" name="all" value="1">
+                <button type="submit" class="btn btn-sm btn-outline-danger">Hapus Semua</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="card-body p-0">
+        @if(!isset($etlLogs) || $etlLogs->isEmpty())
+            <div class="p-4 text-muted small text-center">Belum ada batch ETL.</div>
+        @else
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead class="table-light">
+                    <tr>
+                        <th>#</th>
+                        <th>Waktu</th>
+                        <th>Status</th>
+                        <th class="text-end">Total</th>
+                        <th class="text-end">Sukses</th>
+                        <th class="text-end">Duplikat</th>
+                        <th class="text-end">Gagal</th>
+                        <th class="text-center">Aksi</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    @foreach($etlLogs as $log)
+                        <tr>
+                            <td>#{{ $log->id }}</td>
+                            <td class="text-nowrap small">{{ optional($log->imported_at)->format('d M Y H:i') }}</td>
+                            <td>
+                                @php
+                                    $badgeClass = match($log->status) {
+                                        'done'    => 'bg-success',
+                                        'error'   => 'bg-danger',
+                                        'running' => 'bg-info',
+                                        'queued'  => 'bg-secondary',
+                                        default   => 'bg-light text-dark',
+                                    };
+                                @endphp
+                                <span class="badge {{ $badgeClass }}">{{ $log->status }}</span>
+                            </td>
+                            <td class="text-end">{{ number_format($log->total_rows) }}</td>
+                            <td class="text-end text-success">{{ number_format($log->success_count) }}</td>
+                            <td class="text-end text-warning">{{ number_format($log->duplicate_count) }}</td>
+                            <td class="text-end text-danger">{{ number_format($log->failed_count) }}</td>
+                            <td class="text-center text-nowrap">
+                                <a href="{{ route('import.result', $log->id) }}" class="btn btn-sm btn-outline-primary">Detail</a>
+                                @if(!in_array($log->status, ['queued', 'running'], true))
+                                    <form action="{{ route('import.history.destroy', $log->id) }}" method="POST" class="d-inline" onsubmit="return confirm('Hapus histori ETL #{{ $log->id }}? Data hasil batch juga akan dihapus.');">
+                                        @csrf
+                                        @method('DELETE')
+                                        <button type="submit" class="btn btn-sm btn-outline-danger">Hapus</button>
+                                    </form>
+                                @endif
+                            </td>
+                        </tr>
+                    @endforeach
+                    </tbody>
+                </table>
+            </div>
+            {{-- Pagination (pakai default Laravel). Jika tampilannya mengganggu, bisa diganti manual di sini. --}}
+            <div class="p-3">
+                {{ $etlLogs->links('pagination::bootstrap-5') }}
+            </div>
+
+        @endif
+    </div>
+</div>
+
+{{-- ── Sidebar Info ────────────────────────────────────────────────── --}}
     <div class="col-lg-5 d-flex flex-column gap-4">
+
 
         {{-- Status ETL --}}
         <div class="card panel-card">

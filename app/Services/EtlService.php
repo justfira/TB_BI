@@ -21,6 +21,71 @@ class EtlService
     protected array $cacheTeknisi   = [];
     protected array $cachePelanggan = [];
 
+    // ─── Hapus data ETL ──────────────────────────────────────────────────────
+
+    /**
+     * Hapus semua data hasil ETL (full) untuk mendukung tombol "Hapus Semua".
+     */
+    public function deleteAllEtlData(): array
+    {
+        return DB::transaction(function () {
+            $factIds = DB::table('fact_workorder')->pluck('id')->all();
+
+            $deletedKendala = 0;
+            if (!empty($factIds)) {
+                $deletedKendala = DB::table('fact_kendalateknis')
+                    ->whereIn('fact_workorder_id', $factIds)
+                    ->delete();
+            }
+
+            $deletedFact  = DB::table('fact_workorder')->delete();
+            $deletedInfra = DB::table('dim_infrastruktur')->delete();
+
+            return [
+                'fact_workorder'     => (int) $deletedFact,
+                'fact_kendalateknis' => (int) $deletedKendala,
+                'dim_infrastruktur'  => (int) $deletedInfra,
+            ];
+        });
+    }
+
+    /**
+     * Hapus seluruh data hasil ETL untuk sebuah log_id (fact + infra + kendalateknis).
+     * Catatan: dim_* yang di-share tidak dihapus.
+     */
+    public function deleteEtlBatch(int $etlLogId): array
+    {
+        return DB::transaction(function () use ($etlLogId) {
+            $factIds = DB::table('fact_workorder')
+                ->where('etl_log_id', $etlLogId)
+                ->pluck('id')
+                ->all();
+
+            $deletedKendala = 0;
+            if (!empty($factIds)) {
+                $deletedKendala = DB::table('fact_kendalateknis')
+                    ->whereIn('fact_workorder_id', $factIds)
+                    ->delete();
+            }
+
+            $deletedFact = DB::table('fact_workorder')
+                ->where('etl_log_id', $etlLogId)
+                ->delete();
+
+            $deletedInfra = DB::table('dim_infrastruktur')
+                ->where('etl_log_id', $etlLogId)
+                ->delete();
+
+            return [
+                'fact_workorder'     => (int) $deletedFact,
+                'fact_kendalateknis' => (int) $deletedKendala,
+                'dim_infrastruktur'  => (int) $deletedInfra,
+            ];
+        });
+    }
+
+    // ─── Preview ─────────────────────────────────────────────────────────────
+
     public function preview(string $filePath): array
     {
         return $this->importer->analyzeHeaders($filePath);
@@ -31,7 +96,7 @@ class EtlService
         return $this->importer->getCanonicalHeaderLabels();
     }
 
-    // ─── ETL Utama ───────────────────────────────────────────────────────────
+    // ─── Proses utama ETL ───────────────────────────────────────────────────
 
     public function processUploadedFile(
         string $filePath,
@@ -66,78 +131,55 @@ class EtlService
         $total = $success = $failed = $duplicate = 0;
 
         try {
-            // ── Load existing WO IDs sekali ──────────────────────────────────
-            $existingWoIds = DB::table('fact_workorder')
-                ->pluck('wo_id')
-                ->flip()
-                ->all();
+            // Fast path: DB-side ETL via stored procedure.
+            // staging_workorder tidak punya log_id, jadi bersihkan staging dulu.
+            DB::table('staging_workorder')->truncate();
 
-            // ── Load cache dimensi yang sudah ada ────────────────────────────
-            // Catatan: cachePelanggan bisa sangat mahal kalau dim_pelanggan sudah besar.
-            // Untuk performa target < 1 menit, kita tetap warm cache lainnya, tapi dim_pelanggan
-            // akan di-handle secara on-demand per batch (lihat warmCachesLite()).
-            $this->warmCachesLite();
-
-
-            // ── Baca file 1x — kumpulkan semua baris dulu per batch ──────────
-            // Setiap batch: resolve dimensi baru → insert → insert facts
-            $batch          = [];
-            $batchSize      = 500;
-            $lastUpdateTotal= 0;
+            $stagingBatch     = [];
+            $stagingChunkSize = 2000;
+            $lastUpdateTotal  = 0;
 
             foreach ($this->importer->rowGenerator($filePath, $manualMapping) as $row) {
                 $total++;
-                $batch[] = $row;
 
-                if (count($batch) >= $batchSize) {
-                    // Upsert dimensi baru yang muncul di batch ini
-                    $this->upsertBatchDimensions($batch);
+                $stagingBatch[] = [
+                    'data_json'  => $row,
+                    'status'     => 'pending',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
 
-                    // Cache dimensi diupdate di dalam upsertBatchDimensions(),
-                    // jadi tidak perlu refresh seluruh tabel per batch.
-                    [$bS, $fS, $dS] = $this->flushFactsBatch($batch, $existingWoIds);
+                if (count($stagingBatch) >= $stagingChunkSize) {
+                    DB::table('staging_workorder')->insert($stagingBatch);
+                    $stagingBatch = [];
 
-                    $success   += $bS;
-                    $failed    += $fS;
-                    $duplicate += $dS;
-                    $batch      = [];
-
-                    // Update progress lebih sering supaya output di UI terasa
-                    // (polling tiap 3 detik di halaman hasil)
                     if ($total - $lastUpdateTotal >= 500) {
-
                         DB::table('etl_logs')->where('id', $log->id)->update([
-                            'total_rows'      => $total,
-                            'success_count'   => $success,
-                            'failed_count'    => $failed,
-                            'duplicate_count' => $duplicate,
-                            'updated_at'      => now(),
+                            'total_rows' => $total,
+                            'updated_at' => now(),
                         ]);
                         $lastUpdateTotal = $total;
                     }
                 }
             }
 
-            // Flush sisa
-            if (!empty($batch)) {
-                $this->upsertBatchDimensions($batch);
-                // Hindari refresh cache penuh karena ini mahal.
-                // upsertBatchDimensions sudah update cache untuk nilai baru via kondisi cache lokal.
-                [$bS, $fS, $dS] = $this->flushFactsBatch($batch, $existingWoIds);
-                $success   += $bS;
-                $failed    += $fS;
-                $duplicate += $dS;
+            if (!empty($stagingBatch)) {
+                DB::table('staging_workorder')->insert($stagingBatch);
             }
 
+            // Jalankan transformasi set-based di DB
+            DB::unprepared('CALL sp_etl_workorder(' . (int) $log->id . ')');
 
             DB::table('etl_logs')->where('id', $log->id)->update([
                 'total_rows'      => $total,
-                'success_count'   => $success,
-                'failed_count'    => $failed,
-                'duplicate_count' => $duplicate,
+                'success_count'   => $total,
+                'failed_count'    => 0,
+                'duplicate_count' => 0,
                 'status'          => 'done',
                 'updated_at'      => now(),
             ]);
+
+            return $log->fresh();
 
         } catch (\Throwable $e) {
             DB::table('etl_logs')->where('id', $log->id)->update([
@@ -155,473 +197,379 @@ class EtlService
         return $log->fresh();
     }
 
-    // ─── Upsert dimensi baru dari 1 batch ────────────────────────────────────
-    // Hanya insert nilai yang BELUM ada di cache (skip yang sudah ada)
+    // ─── Bulk upsert dimensi ─────────────────────────────────────────────────
 
-    protected function upsertBatchDimensions(array $batch): void
+    protected function bulkUpsertWaktu(array $tanggals, string $now): void
     {
-        $now = now()->toDateTimeString();
-
-        // Kumpulkan nilai unik dari batch — hanya yang belum di cache
-        $newSto      = [];
-        $newStatus   = [];
-        $newKendala  = [];
-        $newTeknisi  = [];
-        $newPelanggan= [];
-        $newTanggal  = [];
-
-        foreach ($batch as $row) {
-            $sto     = trim($row['sto'] ?? 'UNKNOWN');
-            $status  = trim($row['status_wo'] ?? $row['status'] ?? 'UNKNOWN');
-            $kendala = trim($row['kendala_pt1'] ?? 'UNKNOWN');
-            $nik     = trim($row['nik_teknisi'] ?? '') ?: 'UNKNOWN';
-            $tid     = trim($row['track_id'] ?? $row['wo_sc_id'] ?? '');
-            $tgl     = $this->parseDate($row['tanggal'] ?? null) ?? now()->toDateString();
-
-            if (!isset($this->cacheSto[$sto]))           $newSto[$sto]          = true;
-            if (!isset($this->cacheStatus[$status]))     $newStatus[$status]    = true;
-            if (!isset($this->cacheKendala[$kendala]))   $newKendala[$kendala]  = true;
-            if (!isset($this->cacheTeknisi[$nik]))       $newTeknisi[$nik]      = true;
-            if ($tid && !isset($this->cachePelanggan[$tid])) {
-                $newPelanggan[$tid] = $row; // simpan row untuk ambil detail pelanggan
-            }
-            if (!isset($this->cacheWaktu[$tgl]))         $newTanggal[$tgl]      = true;
+        if (empty($tanggals)) return;
+        $existing = DB::table('dim_waktu')->whereIn('tanggal', $tanggals)->pluck('tanggal')->flip()->all();
+        $toInsert = [];
+        foreach ($tanggals as $tgl) {
+            if (isset($existing[$tgl])) continue;
+            $dt = Carbon::parse($tgl);
+            $toInsert[] = [
+                'tanggal'    => $tgl,
+                'tahun'      => $dt->year,
+                'bulan'      => $dt->month,
+                'hari'       => $dt->day,
+                'nama_bulan' => $dt->locale('id')->isoFormat('MMMM'),
+                'nama_hari'  => $dt->locale('id')->isoFormat('dddd'),
+                'kuartal'    => (int) ceil($dt->month / 3),
+                'hari_kerja' => $dt->isWeekday() ? 1 : 0,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
         }
-
-        // ── dim_waktu ────────────────────────────────────────────────────────
-        if (!empty($newTanggal)) {
-            $existing = DB::table('dim_waktu')
-                ->whereIn('tanggal', array_keys($newTanggal))
-                ->pluck('tanggal')->flip()->all();
-
-            $toInsert = [];
-            foreach (array_keys($newTanggal) as $tgl) {
-                if (!isset($existing[$tgl])) {
-                    $dt = Carbon::parse($tgl);
-                    $toInsert[] = [
-                        'tanggal'         => $tgl,
-                        'bulan'           => $dt->month,
-                        'nama_bulan'      => $dt->locale('id')->isoFormat('MMMM'),
-                        'tahun'           => $dt->year,
-                        'kuartal'         => (int) ceil($dt->month / 3),
-                        'nama_hari'       => $dt->locale('id')->isoFormat('dddd'),
-                        'nomor_minggu'    => $dt->weekOfYear,
-                        'is_weekend'      => $dt->isWeekend() ? 1 : 0,
-                        'periode_laporan' => $dt->format('Y-m'),
-                        'created_at'      => $now,
-                        'updated_at'      => $now,
-                    ];
-                }
-            }
-            if (!empty($toInsert)) {
-                DB::table('dim_waktu')->insertOrIgnore($toInsert);
-            }
-        }
-
-        // ── dim_sto ──────────────────────────────────────────────────────────
-        if (!empty($newSto)) {
-            $existing = DB::table('dim_sto')
-                ->whereIn('nama_sto', array_keys($newSto))
-                ->pluck('nama_sto')->flip()->all();
-
-            $toInsert = [];
-            foreach (array_keys($newSto) as $sto) {
-                if (!isset($existing[$sto])) {
-                    $toInsert[] = ['nama_sto' => $sto, 'created_at' => $now, 'updated_at' => $now];
-                }
-            }
-            if (!empty($toInsert)) {
-                DB::table('dim_sto')->insertOrIgnore($toInsert);
-            }
-        }
-
-        // ── dim_status ───────────────────────────────────────────────────────
-        if (!empty($newStatus)) {
-            $existing = DB::table('dim_status')
-                ->whereIn('status_wo', array_keys($newStatus))
-                ->pluck('status_wo')->flip()->all();
-
-            $toInsert = [];
-            foreach (array_keys($newStatus) as $sw) {
-                if (!isset($existing[$sw])) {
-                    $toInsert[] = [
-                        'status_wo'    => $sw,
-                        'status_final' => $sw,
-                        'status_group' => DimStatus::resolveGroup($sw),
-                        'created_at'   => $now,
-                        'updated_at'   => $now,
-                    ];
-                }
-            }
-            if (!empty($toInsert)) {
-                DB::table('dim_status')->insertOrIgnore($toInsert);
-            }
-        }
-
-        // ── dim_kendala ──────────────────────────────────────────────────────
-        if (!empty($newKendala)) {
-            $existing = DB::table('dim_kendala')
-                ->whereIn('kendala_pt1', array_keys($newKendala))
-                ->pluck('kendala_pt1')->flip()->all();
-
-            $toInsert = [];
-            foreach ($batch as $row) {
-                $k = trim($row['kendala_pt1'] ?? 'UNKNOWN');
-                if (isset($newKendala[$k]) && !isset($existing[$k]) && !isset($toInsert[$k])) {
-                    $toInsert[$k] = [
-                        'kendala_pt1'     => $k,
-                        'kategori_roc'    => $row['kategori_roc']    ?? null,
-                        'kategori_solusi' => $row['kategori_solusi'] ?? null,
-                        'solusi_kendala'  => $row['solusi_kendala']  ?? null,
-                        'keterangan'      => $row['keterangan']      ?? null,
-                        'created_at'      => $now,
-                        'updated_at'      => $now,
-                    ];
-                }
-            }
-            if (!empty($toInsert)) {
-                DB::table('dim_kendala')->insertOrIgnore(array_values($toInsert));
-            }
-        }
-
-        // ── dim_teknisi ──────────────────────────────────────────────────────
-        if (!empty($newTeknisi)) {
-            $existing = DB::table('dim_teknisi')
-                ->whereIn('nik_teknisi', array_keys($newTeknisi))
-                ->pluck('nik_teknisi')->flip()->all();
-
-            $toInsert = [];
-            foreach ($batch as $row) {
-                $nik = trim($row['nik_teknisi'] ?? '') ?: 'UNKNOWN';
-                if (isset($newTeknisi[$nik]) && !isset($existing[$nik]) && !isset($toInsert[$nik])) {
-                    $toInsert[$nik] = [
-                        'nik_teknisi'   => $nik,
-                        'nama_teknisi'  => $row['korlap']        ?? $row['mitra'] ?? '-',
-                        'nama_mitra'    => $row['mitra']         ?? null,
-                        'korlap'        => $row['korlap']        ?? null,
-                        'komandan_team' => $row['komandan_team'] ?? null,
-                        'unit_kerja'    => $row['spv']           ?? null,
-                        'spv'           => $row['spv']           ?? null,
-                        'cp'            => $row['cp']            ?? null,
-                        'status_aktif'  => 1,
-                        'created_at'    => $now,
-                        'updated_at'    => $now,
-                    ];
-                }
-            }
-            if (!empty($toInsert)) {
-                DB::table('dim_teknisi')->insertOrIgnore(array_values($toInsert));
-            }
-        }
-
-        // ── dim_pelanggan ────────────────────────────────────────────────────
-        if (!empty($newPelanggan)) {
-            $existing = DB::table('dim_pelanggan')
-                ->whereIn('kode_tracking', array_keys($newPelanggan))
-                ->pluck('kode_tracking')->flip()->all();
-
-            $toInsert = [];
-            foreach ($newPelanggan as $tid => $row) {
-                if (!isset($existing[$tid]) && !isset($toInsert[$tid])) {
-                    $lat = $this->parseCoord($row['koordinat_lat'] ?? null);
-                    $lon = $this->parseCoord($row['koordinat_lon'] ?? null);
-                    if ($lat === null && !empty($row['koordinat_pelanggan'])) {
-                        [$lat, $lon] = $this->parseKoordinat($row['koordinat_pelanggan']);
-                    }
-                    $toInsert[$tid] = [
-                        'kode_tracking'    => $tid,
-                        'nama_pelanggan'   => $row['nama_pelanggan']   ?? null,
-                        'nama_contact'     => $row['nama_contact']     ?? null,
-                        'segment'          => $row['segment']          ?? null,
-                        'layanan'          => $row['layanan']          ?? null,
-                        'alamat_instalasi' => $row['alamat_instalasi'] ?? null,
-                        'uic'              => $row['uic']              ?? null,
-                        'koordinat_lat'    => $lat,
-                        'koordinat_lon'    => $lon,
-                        'created_at'       => $now,
-                        'updated_at'       => $now,
-                    ];
-                }
-            }
-            if (!empty($toInsert)) {
-                DB::table('dim_pelanggan')->insertOrIgnore(array_values($toInsert));
+        if (!empty($toInsert)) {
+            foreach (array_chunk($toInsert, 500) as $chunk) {
+                DB::table('dim_waktu')->insertOrIgnore($chunk);
             }
         }
     }
 
-    // ─── Load cache ID dari DB ────────────────────────────────────────────────
+    protected function bulkUpsertSto(array $stoNames, string $now): void
+    {
+        if (empty($stoNames)) return;
+        $existing = DB::table('dim_sto')->whereIn('nama_sto', $stoNames)->pluck('nama_sto')->flip()->all();
+        $toInsert = [];
+        foreach ($stoNames as $sto) {
+            if (isset($existing[$sto])) continue;
+            $kode = substr(strtoupper(preg_replace('/[^A-Z0-9]/', '', strtoupper($sto))) ?: 'UNK', 0, 40);
+            $toInsert[] = [
+                'kode_sto'   => $kode . '_' . substr(md5($sto), 0, 6),
+                'nama_sto'   => $sto,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+        }
+        if (!empty($toInsert)) {
+            foreach (array_chunk($toInsert, 500) as $chunk) {
+                DB::table('dim_sto')->insertOrIgnore($chunk);
+            }
+        }
+    }
+
+    protected function bulkUpsertStatus(array $statusNames, string $now): void
+    {
+        if (empty($statusNames)) return;
+        $existing = DB::table('dim_status')->whereIn('status_name', $statusNames)->pluck('status_name')->flip()->all();
+        $toInsert = [];
+        foreach ($statusNames as $sw) {
+            if (isset($existing[$sw])) continue;
+            $toInsert[] = [
+                'status_name'  => $sw,
+                'status_group' => DimStatus::resolveGroup($sw),
+                'aktif'        => 1,
+                'created_at'   => $now,
+                'updated_at'   => $now,
+            ];
+        }
+        if (!empty($toInsert)) {
+            foreach (array_chunk($toInsert, 500) as $chunk) {
+                DB::table('dim_status')->insertOrIgnore($chunk);
+            }
+        }
+    }
+
+    protected function bulkUpsertKendala(array $uniqueKendala, array $allRows, string $now): void
+    {
+        if (empty($uniqueKendala)) return;
+        $kendalaNames = array_keys($uniqueKendala);
+        $existing     = DB::table('dim_kendala')->whereIn('kendala_pt1', $kendalaNames)->pluck('kendala_pt1')->flip()->all();
+
+        $detailMap = [];
+        foreach ($allRows as $row) {
+            $k = trim($row['kendala_pt1'] ?? 'UNKNOWN');
+            if (!isset($existing[$k]) && !isset($detailMap[$k])) {
+                $detailMap[$k] = $row;
+            }
+        }
+
+        $toInsert = [];
+        foreach ($kendalaNames as $k) {
+            if (isset($existing[$k])) continue;
+            $row = $detailMap[$k] ?? [];
+            $toInsert[] = [
+                'kendala_pt1'     => $k,
+                'kategori_roc'    => $row['kategori_roc']    ?? null,
+                'kategori_solusi' => $row['kategori_solusi'] ?? null,
+                'solusi_kendala'  => $row['solusi_kendala']  ?? null,
+                'keterangan'      => $row['keterangan']      ?? null,
+                'created_at'      => $now,
+                'updated_at'      => $now,
+            ];
+        }
+        if (!empty($toInsert)) {
+            foreach (array_chunk($toInsert, 500) as $chunk) {
+                DB::table('dim_kendala')->insertOrIgnore($chunk);
+            }
+        }
+    }
+
+    protected function bulkUpsertTeknisi(array $uniqueTeknisi, array $allRows, string $now): void
+    {
+        if (empty($uniqueTeknisi)) return;
+        $niks     = array_keys($uniqueTeknisi);
+        $existing = DB::table('dim_teknisi')->whereIn('nik_teknisi', $niks)->pluck('nik_teknisi')->flip()->all();
+
+        $detailMap = [];
+        foreach ($allRows as $row) {
+            $nik = trim($row['nik_teknisi'] ?? '') ?: 'UNKNOWN';
+            if (!isset($existing[$nik]) && !isset($detailMap[$nik])) {
+                $detailMap[$nik] = $row;
+            }
+        }
+
+        $toInsert = [];
+        foreach ($niks as $nik) {
+            if (isset($existing[$nik])) continue;
+            $row = $detailMap[$nik] ?? [];
+            $toInsert[] = [
+                'nik_teknisi'   => $nik,
+                'nama_teknisi'  => $row['korlap']        ?? $row['mitra'] ?? '-',
+                'korlap'        => $row['korlap']        ?? null,
+                'komandan_team' => $row['komandan_team'] ?? null,
+                'mitra'         => $row['mitra']         ?? null,
+                'nama_mitra'    => $row['mitra']         ?? null,
+                'spv'           => $row['spv']           ?? null,
+                'cp'            => $row['cp']            ?? null,
+                'created_at'    => $now,
+                'updated_at'    => $now,
+            ];
+        }
+        if (!empty($toInsert)) {
+            foreach (array_chunk($toInsert, 500) as $chunk) {
+                DB::table('dim_teknisi')->insertOrIgnore($chunk);
+            }
+        }
+    }
+
+    protected function bulkUpsertPelanggan(array $uniquePelanggan, string $now): void
+    {
+        if (empty($uniquePelanggan)) return;
+        $kContacts = array_keys($uniquePelanggan);
+        $existing  = DB::table('dim_pelanggan')->whereIn('k_contact', $kContacts)->pluck('k_contact')->flip()->all();
+
+        $toInsert = [];
+        foreach ($uniquePelanggan as $kContact => $row) {
+            if (isset($existing[$kContact])) continue;
+            $lat = $this->parseCoord($row['koordinat_lat'] ?? null);
+            $lon = $this->parseCoord($row['koordinat_lon'] ?? null);
+            if ($lat === null && !empty($row['koordinat_pelanggan'])) {
+                [$lat, $lon] = $this->parseKoordinat($row['koordinat_pelanggan']);
+            }
+            $toInsert[] = [
+                'k_contact'           => $kContact,
+                'nama_pelanggan'      => $row['nama_pelanggan']      ?? null,
+                'nama_contact'        => $row['nama_contact']        ?? null,
+                'segment'             => $row['segment']             ?? null,
+                'layanan'             => $row['layanan']             ?? null,
+                'alamat_instalasi'    => $row['alamat_instalasi']    ?? null,
+                'uic'                 => $row['uic']                 ?? null,
+                'koordinat_pelanggan' => $row['koordinat_pelanggan'] ?? null,
+                'koordinat_lat'       => $lat,
+                'koordinat_lon'       => $lon,
+                'created_at'          => $now,
+                'updated_at'          => $now,
+            ];
+        }
+        if (!empty($toInsert)) {
+            foreach (array_chunk($toInsert, 500) as $chunk) {
+                DB::table('dim_pelanggan')->insertOrIgnore($chunk);
+            }
+        }
+    }
+
+    // ─── Load cache ID saja ───────────────────────────────────────────────────
 
     protected function warmCachesLite(): void
     {
-        $this->cacheSto = DB::table('dim_sto')
-            ->pluck('sto_id', 'nama_sto')->all();
+        $this->cacheSto = DB::table('dim_sto')->pluck('id', 'nama_sto')->all();
 
         $this->cacheStatus = DB::table('dim_status')
-            ->get(['status_id', 'status_wo', 'status_group'])
-            ->keyBy('status_wo')
-            ->map(fn($r) => ['id' => $r->status_id, 'group' => $r->status_group])
+            ->get(['id', 'status_name', 'status_group'])
+            ->mapWithKeys(fn($r) => [
+                $r->status_name => ['id' => $r->id, 'group' => $r->status_group]
+            ])->all();
+
+        $this->cacheKendala  = DB::table('dim_kendala')->pluck('id', 'kendala_pt1')->all();
+        $this->cacheWaktu    = DB::table('dim_waktu')->pluck('id', 'tanggal')->all();
+        $this->cacheTeknisi  = DB::table('dim_teknisi')->pluck('id', 'nik_teknisi')->all();
+
+        $this->cachePelanggan = DB::table('dim_pelanggan')
+            ->whereNotNull('k_contact')
+            ->pluck('id', 'k_contact')
             ->all();
-
-        $this->cacheKendala = DB::table('dim_kendala')
-            ->pluck('kendala_id', 'kendala_pt1')->all();
-
-        $this->cacheWaktu = DB::table('dim_waktu')
-            ->pluck('date_id', 'tanggal')->all();
-
-        $this->cacheTeknisi = DB::table('dim_teknisi')
-            ->pluck('teknisi_id', 'nik_teknisi')->all();
-
-        if (DB::table('dim_pelanggan')->count() < 100_000) {
-            $this->cachePelanggan = DB::table('dim_pelanggan')
-                ->pluck('pelanggan_id', 'kode_tracking')->all();
-        }
     }
 
-    // ─── Refresh hanya bagian cache yang berubah ──────────────────────────────
-    // Lebih cepat dari warmCachesLite() penuh karena skip tabel yang tidak berubah
+    // ─── Flush 1000 baris ke fact tables ─────────────────────────────────────
 
-    protected function refreshCaches(): void
-    {
-        $this->cacheSto = DB::table('dim_sto')
-            ->pluck('sto_id', 'nama_sto')->all();
-
-        $this->cacheStatus = DB::table('dim_status')
-            ->get(['status_id', 'status_wo', 'status_group'])
-            ->keyBy('status_wo')
-            ->map(fn($r) => ['id' => $r->status_id, 'group' => $r->status_group])
-            ->all();
-
-        $this->cacheKendala = DB::table('dim_kendala')
-            ->pluck('kendala_id', 'kendala_pt1')->all();
-
-        $this->cacheWaktu = DB::table('dim_waktu')
-            ->pluck('date_id', 'tanggal')->all();
-
-        $this->cacheTeknisi = DB::table('dim_teknisi')
-            ->pluck('teknisi_id', 'nik_teknisi')->all();
-
-        if (DB::table('dim_pelanggan')->count() < 100_000) {
-            $this->cachePelanggan = DB::table('dim_pelanggan')
-                ->pluck('pelanggan_id', 'kode_tracking')->all();
-        }
-    }
-
-    // ─── Flush batch ke fact tables ───────────────────────────────────────────
-
-    protected function flushFactsBatch(array $batch, array &$existingWoIds): array
+    protected function flushFactsBatch(array $batch, array &$existingWoIds, string $now, int $etlLogId): array
     {
         $success = $failed = $duplicate = 0;
-        $now     = now()->toDateTimeString();
-
-        $factWoRows      = [];
-        $factKendalaRows = [];
-        $infraInserts    = [];
-
-        // Prefetch pelanggan_id per-batch supaya tidak ada query per-row
-        $needTrackIds = [];
-        foreach ($batch as $r) {
-            $trackId = trim($r['track_id'] ?? $r['wo_sc_id'] ?? '');
-            if ($trackId !== '' && !isset($this->cachePelanggan[$trackId])) {
-                $needTrackIds[$trackId] = true;
-            }
-        }
-        if (!empty($needTrackIds)) {
-            $pelangganMap = DB::table('dim_pelanggan')
-                ->whereIn('kode_tracking', array_keys($needTrackIds))
-                ->pluck('pelanggan_id', 'kode_tracking')
-                ->all();
-
-            foreach ($pelangganMap as $kode => $id) {
-                $this->cachePelanggan[$kode] = $id;
-            }
-        }
+        $validRows    = [];
+        $infraInserts = [];
 
         foreach ($batch as $row) {
-            $woId = trim($row['wo_sc_id'] ?? '');
-            if (empty($woId)) continue;
-            if (isset($existingWoIds[$woId])) { $duplicate++; continue; }
+            $woScId = trim($row['wo_sc_id'] ?? '');
+            if (empty($woScId)) continue;
+            if (isset($existingWoIds[$woScId])) { $duplicate++; continue; }
 
-            $tanggal     = $this->parseDate($row['tanggal'] ?? null) ?? now()->toDateString();
-            $stoName     = trim($row['sto'] ?? 'UNKNOWN');
-            $nikTeknisi  = trim($row['nik_teknisi'] ?? '') ?: 'UNKNOWN';
-            $trackId     = trim($row['track_id'] ?? $woId);
-            $kendalaName = trim($row['kendala_pt1'] ?? 'UNKNOWN');
-            $statusWo    = trim($row['status_wo'] ?? $row['status'] ?? 'UNKNOWN');
+            $tanggal    = $this->parseDate($row['tanggal'] ?? null) ?? now()->toDateString();
+            $stoName    = trim($row['sto'] ?? 'UNKNOWN');
+            $nik        = trim($row['nik_teknisi'] ?? '') ?: 'UNKNOWN';
+            $kContact   = trim($row['track_id'] ?? $woScId);
+            $kendala    = trim($row['kendala_pt1'] ?? 'UNKNOWN');
+            $statusName = trim($row['status_wo'] ?? $row['status'] ?? 'UNKNOWN');
 
-            $dateId      = $this->cacheWaktu[$tanggal]      ?? null;
-            $stoId       = $this->cacheSto[$stoName]         ?? null;
-            $teknisiId   = $this->cacheTeknisi[$nikTeknisi]  ?? null;
+            $waktuId    = $this->cacheWaktu[$tanggal]     ?? null;
+            $stoId      = $this->cacheSto[$stoName]        ?? null;
+            $teknisiId  = $this->cacheTeknisi[$nik]        ?? null;
+            $pelId      = $this->cachePelanggan[$kContact] ?? null;
+            $kendalaId  = $this->cacheKendala[$kendala]    ?? null;
+            $statusInfo = $this->cacheStatus[$statusName]  ?? null;
+            $statusId   = $statusInfo['id']                ?? null;
 
-            $pelangganId = $this->cachePelanggan[$trackId]   ?? null;
-
-            $kendalaId   = $this->cacheKendala[$kendalaName] ?? null;
-            $statusInfo  = $this->cacheStatus[$statusWo]     ?? null;
-            $statusId    = $statusInfo['id']                 ?? null;
-
-
-            if (!$dateId || !$stoId || !$teknisiId || !$pelangganId || !$kendalaId || !$statusId) {
+            if (!$waktuId || !$stoId || !$teknisiId || !$pelId || !$kendalaId || !$statusId) {
                 $failed++;
-                Log::debug('ETL FK miss', compact(
-                    'woId', 'tanggal', 'stoName', 'nikTeknisi',
-                    'trackId', 'kendalaName', 'statusWo'
-                ));
+                Log::debug('ETL FK miss', compact('woScId', 'tanggal', 'stoName', 'nik', 'kContact', 'kendala', 'statusName'));
                 continue;
             }
 
             $isSla      = ($statusInfo['group'] ?? '') === DimStatus::GROUP_SELESAI;
             $isWorkfail = $this->parseFlag($row['unsc'] ?? $row['is_unsc'] ?? null);
-            $durMenit   = $this->parseDurasi($row);
 
+            $validRows[]    = compact('woScId', 'waktuId', 'stoId', 'teknisiId', 'pelId', 'kendalaId', 'statusId', 'isSla', 'isWorkfail', 'row');
             $infraInserts[] = [
-                '_wo_id'                 => $woId,
-                'wo_id'                  => $woId,
-                'odp'                    => $row['odp']                   ?? null,
-
-                'odc'                    => $row['odc']                   ?? null,
-                'gpon'                   => $row['gpon']                  ?? null,
-                'feeder'                 => $row['feeder']                ?? null,
-                'distribusi'             => $row['distribusi']            ?? null,
-                'datek1'                 => $row['datek1']                ?? null,
-                'datek_inputan'          => $row['datek_inputan']         ?? null,
-                'datek_real'             => $row['datek_real']            ?? null,
-                'base_tray_odc'          => $row['base_tray_odc']         ?? null,
-                'port_base_tray_odc'     => $row['port_base_tray_odc']    ?? null,
-                'hasil_ukur_odp'         => $row['hasil_ukur_odp']        ?? null,
-                'hasil_ukur_distribusi'  => $row['hasil_ukur_distribusi'] ?? null,
-                'hasil_ukur_feeder'      => $row['hasil_ukur_feeder']     ?? null,
-                'status_aktif'           => 1,
-                'created_at'             => $now,
-                'updated_at'             => $now,
+                '_wo_sc_id'             => $woScId,
+                'wo_id'                 => $woScId,
+                'etl_log_id'            => $etlLogId,
+                'odp'                   => $row['odp']                   ?? null,
+                'odc'                   => $row['odc']                   ?? null,
+                'gpon'                  => $row['gpon']                  ?? null,
+                'feeder'                => $row['feeder']                ?? null,
+                'distribusi'            => $row['distribusi']            ?? null,
+                'core_distribusi'       => $row['distribusi']            ?? null,
+                'datek1'                => $row['datek1']                ?? null,
+                'datek_inputan'         => $row['datek_inputan']         ?? null,
+                'datek_real'            => $row['datek_real']            ?? null,
+                'base_tray_odc'         => $row['base_tray_odc']         ?? null,
+                'port_base_tray_odc'    => $row['port_base_tray_odc']    ?? null,
+                'hasil_ukur_odp'        => $row['hasil_ukur_odp']        ?? null,
+                'hasil_ukur_distribusi' => $row['hasil_ukur_distribusi'] ?? null,
+                'hasil_ukur_feeder'     => $row['hasil_ukur_feeder']     ?? null,
+                'created_at'            => $now,
+                'updated_at'            => $now,
             ];
 
-            $factWoRows[] = [
-                'wo_id'                   => $woId,
-                'date_id'                 => $dateId,
-                'dim_waktu_id'            => $dateId,
-                'sto_id'                  => $stoId,
-                'dim_sto_id'              => $stoId,
-                'teknisi_id'              => $teknisiId,
-                'dim_teknisi_id'          => $teknisiId,
-                'pelanggan_id'            => $pelangganId,
-                'dim_pelanggan_id'        => $pelangganId,
-                'kendala_id'              => $kendalaId,
-                'dim_kendala_id'          => $kendalaId,
-                'status_id'               => $statusId,
-                'dim_status_id'           => $statusId,
-                'tanggal_order'           => $this->parseDate($row['tanggal_order'] ?? null),
-                'tanggal_komitmen'        => $this->parseDate($row['tanggal_komitmen_ps_completed'] ?? null),
-                'status_wo'               => $statusWo,
-                'status_sc'               => $row['status_sc']  ?? null,
-                'durasi_hari'             => $this->parseDecimal($row['durasi_hari'] ?? null),
-                'durasi_pengerjaan_menit' => $durMenit,
-                'durasi_grup'             => $this->parseDecimal($row['durasi_grup'] ?? null),
-                'durasi_manja'            => $this->parseDecimal($row['durasi_manja'] ?? null),
-                'tgl_input_hd_gdocs'      => $this->parseDatetime($row['tgl_input_hd_gdocs'] ?? null),
-                'is_sla_tercapai'         => $isSla ? 1 : 0,
-                'is_workfail'             => $isWorkfail ? 1 : 0,
-                'is_unsc'                 => $isWorkfail ? 1 : 0,
-                'sc_id'                   => $row['sc_id']    ?? null,
-                'track_id'                => $row['track_id'] ?? null,
-                'track_id_baru'           => null,
-                'keterangan'              => $row['keterangan'] ?? null,
-                'created_at'              => $now,
-                'updated_at'              => $now,
-            ];
-
-            $factKendalaRows[] = [
-                '_wo_id'                 => $woId,
-                'date_id'                => $dateId,
-                'sto_id'                 => $stoId,
-                'kendala_id'             => $kendalaId,
-                'dim_kendala_id'         => $kendalaId,
-                'dim_teknisi_id'         => $teknisiId,
-                'dim_status_id'          => $statusId,
-
-                // mapping result - sesuai kolom yang ada di migration
-                'keterangan'             => $row['keterangan'] ?? null,
-                'resolusi_jam'           => $this->parseDecimal($row['resolusi_jam'] ?? null),
-                'root_cause'             => $row['root_cause'] ?? null,
-
-                'created_at'             => $now,
-                'updated_at'             => $now,
-            ];
-
-
-            $existingWoIds[$woId] = true;
-            $success++;
+            $existingWoIds[$woScId] = true;
         }
 
-        if (empty($infraInserts)) {
-            return [$success, $failed, $duplicate];
-        }
+        if (empty($validRows)) return [$success, $failed, $duplicate];
 
         try {
             DB::beginTransaction();
 
-            // Insert dim_infrastruktur + isi wo_id agar bisa di-map cepat ke fact_kendalateknis
-
-            // Insert dim_infrastruktur
-
-            $infraData = array_map(function ($r) {
-                // strip temp key
-                unset($r['_wo_id']);
-                unset($r['wo_id']); // dim_infrastruktur memang tidak punya kolom ini
-                return $r;
-            }, $infraInserts);
-
-            // chunk besar untuk mengurangi jumlah statement insert
-            foreach (array_chunk($infraData, 2000) as $chunk) {
+            // 1. Bulk insert infrastruktur
+            $infraData = array_map(fn($r) => array_diff_key($r, ['_wo_sc_id' => 0]), $infraInserts);
+            foreach (array_chunk($infraData, 1000) as $chunk) {
                 DB::table('dim_infrastruktur')->insert($chunk);
             }
 
-
-            // Map infra_id berdasarkan wo_id (kolom wo_id sudah ditambahkan via migration)
-            $woIds = array_values(array_unique(array_column($infraInserts, '_wo_id')));
+            // 2. Ambil infra_id
+            $woScIds  = array_column($infraInserts, '_wo_sc_id');
             $infraMap = DB::table('dim_infrastruktur')
-                ->whereIn('wo_id', $woIds)
-                ->pluck('infra_id', 'wo_id')
+                ->whereIn('wo_id', $woScIds)
+                ->pluck('id', 'wo_id')
                 ->all();
 
-            // Inject infra_id ke fact_kendalateknis
-            foreach ($factKendalaRows as &$fk) {
-                $fk['infra_id'] = $infraMap[$fk['_wo_id']] ?? null;
-                $fk['dim_infrastruktur_id'] = $fk['infra_id'];
-                unset($fk['_wo_id']);
+            // 3. Build + insert fact_workorder
+            $factWoRows = [];
+            foreach ($validRows as $vr) {
+                $infraId = $infraMap[$vr['woScId']] ?? null;
+                if (!$infraId) { $failed++; continue; }
+                $row = $vr['row'];
+                $factWoRows[] = [
+                    'wo_sc_id'                   => $vr['woScId'],
+                    'sc_id'                      => $row['sc_id']         ?? null,
+                    'track_id'                   => $row['track_id']      ?? null,
+                    'track_id_baru'              => $row['track_id_baru'] ?? null,
+                    'dim_waktu_id'               => $vr['waktuId'],
+                    'dim_sto_id'                 => $vr['stoId'],
+                    'dim_teknisi_id'             => $vr['teknisiId'],
+                    'dim_pelanggan_id'           => $vr['pelId'],
+                    'dim_kendala_id'             => $vr['kendalaId'],
+                    'dim_infrastruktur_id'       => $infraId,
+                    'dim_status_id'              => $vr['statusId'],
+                    'tanggal_order'              => $this->parseDate($row['tanggal_order'] ?? null),
+                    'tanggal_komitmen'           => $this->parseDate($row['tanggal_komitmen_ps_completed'] ?? null),
+                    'tgl_input_hd_gdocs'         => $this->parseDate($row['tgl_input_hd_gdocs'] ?? null),
+                    'status_wo'                  => $row['status_wo'] ?? $row['status'] ?? null,
+                    'status_sc'                  => $row['status_sc']  ?? null,
+                    'durasi_hari'                => $this->parseDecimal($row['durasi_hari'] ?? null),
+                    'durasi'                     => $this->parseDecimal($row['durasi'] ?? null),
+                    'durasi_manja'               => $this->parseDecimal($row['durasi_manja'] ?? null),
+                    'durasi_pengerjaan_kendala'  => $this->parseDurasi($row),
+                    'durasi_grup'                => $row['durasi_grup'] ?? null,
+                    'is_sla_tercapai'            => $vr['isSla'] ? 1 : 0,
+                    'is_workfail'                => $vr['isWorkfail'] ? 1 : 0,
+                    'is_unsc'                    => $vr['isWorkfail'] ? 1 : 0,
+                    'etl_log_id'                 => $etlLogId,
+                    'keterangan'                 => $row['keterangan'] ?? null,
+                    'keterangan_sm_provisioning' => $row['keterangan_sm_provisioning'] ?? null,
+                    'keterangan_tl_provisioning' => $row['keterangan_tl_provisioning'] ?? null,
+                    'created_at'                 => $now,
+                    'updated_at'                 => $now,
+                ];
+                $success++;
             }
-            unset($fk);
 
-
-            // Bulk insert: naikkan chunk supaya jumlah statement INSERT turun
-            // (lebih sedikit statement => biasanya lebih cepat saat ada FK/index checks)
-            $factChunkSize = 5000;
-
-            foreach (array_chunk($factWoRows, $factChunkSize) as $chunk) {
-                DB::table('fact_workorder')->insert($chunk);
+            foreach (array_chunk($factWoRows, 1000) as $chunk) {
+                DB::table('fact_workorder')->insertOrIgnore($chunk);
             }
-            foreach (array_chunk($factKendalaRows, $factChunkSize) as $chunk) {
+
+            // 4. fact_kendalateknis
+            $insertedIds = array_column($factWoRows, 'wo_sc_id');
+            $factWoMap   = DB::table('fact_workorder')
+                ->whereIn('wo_sc_id', $insertedIds)
+                ->pluck('id', 'wo_sc_id')
+                ->all();
+
+            $factKendalaRows = [];
+            foreach ($validRows as $vr) {
+                $factWoId = $factWoMap[$vr['woScId']] ?? null;
+                if (!$factWoId) continue;
+                $row = $vr['row'];
+                $factKendalaRows[] = [
+                    'fact_workorder_id'        => $factWoId,
+                    'dim_kendala_id'           => $vr['kendalaId'],
+                    'dim_teknisi_id'           => $vr['teknisiId'],
+                    'dim_status_id'            => $vr['statusId'],
+                    'keterangan'               => $row['keterangan']      ?? null,
+                    'resolusi_jam'             => $this->parseDecimal($row['durasi'] ?? null),
+                    'root_cause'               => $row['kendala_pt1']     ?? null,
+                    'durasi_grup_pengerjaan'   => $this->parseDecimal($row['durasi_grup_pengerjaan'] ?? null),
+                    'hasil_solusi_maintenance' => $row['hasil_solusi_maintenance'] ?? null,
+                    'hasil_solusi_optima'      => $row['hasil_solusi_optima']      ?? null,
+                    'hasil_solusi_sdi'         => $row['hasil_solusi_sdi']         ?? null,
+                    'total_eskalasi'           => (int) ($row['total_eskalasi'] ?? 0),
+                    'jumlah_kendala'           => (int) ($row['jumlah_kendala'] ?? 1),
+                    'created_at'               => $now,
+                    'updated_at'               => $now,
+                ];
+            }
+
+            foreach (array_chunk($factKendalaRows, 1000) as $chunk) {
                 DB::table('fact_kendalateknis')->insert($chunk);
             }
-
-
 
             DB::commit();
 
         } catch (\Throwable $e) {
             DB::rollBack();
-            Log::error('ETL flushFactsBatch error', ['error' => $e->getMessage()]);
+            Log::error('ETL batch error', ['error' => $e->getMessage(), 'line' => $e->getLine()]);
             $failed  += $success;
             $success  = 0;
-
-            foreach ($infraInserts as $r) {
-                try {
-                    DB::table('staging_workorder')->insert([
-                        'data_json'  => json_encode(array_diff_key($r, ['_wo_id' => true])),
-                        'status'     => 'failed',
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ]);
-                } catch (\Throwable) {}
-            }
         }
 
         return [$success, $failed, $duplicate];
@@ -632,14 +580,16 @@ class EtlService
     protected function parseDate(?string $val): ?string
     {
         if (empty($val)) return null;
+        if (is_numeric($val)) {
+            $int = (int) $val;
+            if ($int > 32874 && $int < 73050) {
+                try {
+                    return Carbon::createFromTimestamp(($int - 25569) * 86400)->toDateString();
+                } catch (\Throwable) {}
+            }
+            return null;
+        }
         try { return Carbon::parse($val)->toDateString(); }
-        catch (\Throwable) { return null; }
-    }
-
-    protected function parseDatetime(?string $val): ?string
-    {
-        if (empty($val)) return null;
-        try { return Carbon::parse($val)->toDateTimeString(); }
         catch (\Throwable) { return null; }
     }
 
@@ -685,4 +635,6 @@ class EtlService
         }
         return null;
     }
+
 }
+

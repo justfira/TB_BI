@@ -19,6 +19,9 @@ Route::prefix('import')->name('import.')->group(function () {
     Route::post('/process',    [EtlController::class, 'process'])->name('process');
     Route::get('/result/{id}', [EtlController::class, 'result'])->name('result');
     Route::get('/status/{id}', [EtlController::class, 'status'])->name('status');
+
+    Route::post('/stop/{id}', [EtlController::class, 'stop'])->name('stop');
+    Route::delete('/history/{id}', [EtlController::class, 'destroy'])->name('history.destroy');
 });
 
 // ── Laporan ───────────────────────────────────────────────────────────────────
@@ -27,3 +30,4 @@ Route::prefix('reports')->name('reports.')->group(function () {
     Route::get('/export/excel', [ReportController::class, 'exportExcel'])->name('export.excel');
     Route::get('/export/pdf',   [ReportController::class, 'exportPdf'])->name('export.pdf');
 });
+

@@ -169,9 +169,12 @@
 
         {{-- Ringkasan ETL terakhir --}}
         <div class="card panel-card">
-            <div class="card-header">Batch ETL Terakhir</div>
+            <div class="card-header d-flex align-items-center justify-content-between">
+                <span>Batch ETL Terakhir</span>
+                <a href="{{ route('import.index') }}" class="btn btn-sm btn-outline-secondary">Lihat Histori</a>
+            </div>
             <div class="card-body">
-                @if(isset($latestEtlLog))
+                @if(isset($latestEtlLog) && $latestEtlLog)
                     <div class="text-muted small">Diproses pada:</div>
                     <div class="fw-bold mb-2">{{ $latestEtlLog->imported_at->format('d M Y H:i') }}</div>
                     <div class="d-flex justify-content-between small mb-1"><span>Total Baris</span><span>{{ number_format($latestEtlLog->total_rows) }}</span></div>
@@ -185,6 +188,7 @@
                 @endif
             </div>
         </div>
+
     </div>
 </div>
 

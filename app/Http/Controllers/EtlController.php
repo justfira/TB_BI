@@ -29,8 +29,58 @@ class EtlController extends Controller
         $processedCount = StagingWorkorder::where('status', 'processed')->count();
         $failedCount    = StagingWorkorder::where('status', 'failed')->count();
 
-        return view('import.index', compact('pendingCount', 'processedCount', 'failedCount'));
+        $etlLogs = EtlLog::latest('imported_at')->paginate(10);
+
+        return view('import.index', compact('pendingCount', 'processedCount', 'failedCount', 'etlLogs'));
     }
+
+    public function stop(int $logId)
+    {
+        $log = EtlLog::findOrFail($logId);
+
+        if (!in_array($log->status, ['running', 'queued'], true)) {
+            return back()->with('error', 'Batch ETL ini tidak sedang berjalan.');
+        }
+
+        $log->update([
+            'stop_requested' => 1,
+            'status'         => 'running',
+        ]);
+
+        return back()->with('success', "Stop request dikirim untuk batch #{$log->id}. ");
+    }
+
+    public function destroy(int $logId)
+    {
+        $all = (bool) request()->input('all');
+
+        try {
+            if ($all) {
+                // Hapus semua data hasil ETL (gunakan etl_log_id = semua yang ada)
+                $deleted = $this->etlService->deleteAllEtlData();
+
+                // Hapus semua histori
+                EtlLog::query()->delete();
+
+                return back()->with('success', 'Semua data hasil ETL berhasil dihapus.');
+            }
+
+            $log = EtlLog::findOrFail($logId);
+
+            if (in_array($log->status, ['running', 'queued'], true)) {
+                return back()->with('error', 'Batch ETL masih berjalan dan tidak bisa dihapus.');
+            }
+
+            $this->etlService->deleteEtlBatch($log->id);
+            $log->delete();
+
+            return back()->with('success', "Histori ETL #{$log->id} dan data terkait berhasil dihapus.");
+        } catch (\Throwable $e) {
+            return back()->with('error', 'Gagal menghapus histori: ' . $e->getMessage());
+        }
+    }
+
+
 
     // ── 2. Preview header + sampel baris ─────────────────────────────────────
 
@@ -121,9 +171,26 @@ class EtlController extends Controller
 
     public function status(int $logId)
     {
-        $log = EtlLog::findOrFail($logId);
+        // Cache respon status untuk meredam polling (tiap request bisa ~500ms)
+        // Cache 2 detik cukup untuk UI polling tanpa menahan ETL.
+        $cacheKey = "etl_status_{$logId}";
 
-        return response()->json([
+        $payload = cache($cacheKey);
+        if ($payload) {
+            return response()->json($payload);
+        }
+
+        $log = EtlLog::select([
+            'status',
+            'total_rows',
+            'success_count',
+            'failed_count',
+            'duplicate_count',
+            'error_message',
+            'updated_at',
+        ])->findOrFail($logId);
+
+        $payload = [
             'status'          => $log->status,
             'total_rows'      => $log->total_rows,
             'success_count'   => $log->success_count,
@@ -131,6 +198,11 @@ class EtlController extends Controller
             'duplicate_count' => $log->duplicate_count,
             'error_message'   => $log->error_message,
             'is_done'         => in_array($log->status, ['done', 'error']),
-        ]);
+        ];
+
+        cache()->put($cacheKey, $payload, now()->addSeconds(2));
+
+        return response()->json($payload);
     }
+
 }
