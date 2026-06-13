@@ -73,7 +73,11 @@ class EtlService
                 ->all();
 
             // ── Load cache dimensi yang sudah ada ────────────────────────────
+            // Catatan: cachePelanggan bisa sangat mahal kalau dim_pelanggan sudah besar.
+            // Untuk performa target < 1 menit, kita tetap warm cache lainnya, tapi dim_pelanggan
+            // akan di-handle secara on-demand per batch (lihat warmCachesLite()).
             $this->warmCachesLite();
+
 
             // ── Baca file 1x — kumpulkan semua baris dulu per batch ──────────
             // Setiap batch: resolve dimensi baru → insert → insert facts
@@ -88,18 +92,20 @@ class EtlService
                 if (count($batch) >= $batchSize) {
                     // Upsert dimensi baru yang muncul di batch ini
                     $this->upsertBatchDimensions($batch);
-                    // Refresh cache dengan dimensi baru
-                    $this->refreshCaches();
 
+                    // Cache dimensi diupdate di dalam upsertBatchDimensions(),
+                    // jadi tidak perlu refresh seluruh tabel per batch.
                     [$bS, $fS, $dS] = $this->flushFactsBatch($batch, $existingWoIds);
+
                     $success   += $bS;
                     $failed    += $fS;
                     $duplicate += $dS;
                     $batch      = [];
 
-                    // Update progress setiap 2500 baris (bukan setiap batch)
-                    // supaya tidak spam DB update
-                    if ($total - $lastUpdateTotal >= 2500) {
+                    // Update progress lebih sering supaya output di UI terasa
+                    // (polling tiap 3 detik di halaman hasil)
+                    if ($total - $lastUpdateTotal >= 500) {
+
                         DB::table('etl_logs')->where('id', $log->id)->update([
                             'total_rows'      => $total,
                             'success_count'   => $success,
@@ -115,12 +121,14 @@ class EtlService
             // Flush sisa
             if (!empty($batch)) {
                 $this->upsertBatchDimensions($batch);
-                $this->refreshCaches();
+                // Hindari refresh cache penuh karena ini mahal.
+                // upsertBatchDimensions sudah update cache untuk nilai baru via kondisi cache lokal.
                 [$bS, $fS, $dS] = $this->flushFactsBatch($batch, $existingWoIds);
                 $success   += $bS;
                 $failed    += $fS;
                 $duplicate += $dS;
             }
+
 
             DB::table('etl_logs')->where('id', $log->id)->update([
                 'total_rows'      => $total,
@@ -409,6 +417,25 @@ class EtlService
         $factKendalaRows = [];
         $infraInserts    = [];
 
+        // Prefetch pelanggan_id per-batch supaya tidak ada query per-row
+        $needTrackIds = [];
+        foreach ($batch as $r) {
+            $trackId = trim($r['track_id'] ?? $r['wo_sc_id'] ?? '');
+            if ($trackId !== '' && !isset($this->cachePelanggan[$trackId])) {
+                $needTrackIds[$trackId] = true;
+            }
+        }
+        if (!empty($needTrackIds)) {
+            $pelangganMap = DB::table('dim_pelanggan')
+                ->whereIn('kode_tracking', array_keys($needTrackIds))
+                ->pluck('pelanggan_id', 'kode_tracking')
+                ->all();
+
+            foreach ($pelangganMap as $kode => $id) {
+                $this->cachePelanggan[$kode] = $id;
+            }
+        }
+
         foreach ($batch as $row) {
             $woId = trim($row['wo_sc_id'] ?? '');
             if (empty($woId)) continue;
@@ -424,10 +451,13 @@ class EtlService
             $dateId      = $this->cacheWaktu[$tanggal]      ?? null;
             $stoId       = $this->cacheSto[$stoName]         ?? null;
             $teknisiId   = $this->cacheTeknisi[$nikTeknisi]  ?? null;
+
             $pelangganId = $this->cachePelanggan[$trackId]   ?? null;
+
             $kendalaId   = $this->cacheKendala[$kendalaName] ?? null;
             $statusInfo  = $this->cacheStatus[$statusWo]     ?? null;
             $statusId    = $statusInfo['id']                 ?? null;
+
 
             if (!$dateId || !$stoId || !$teknisiId || !$pelangganId || !$kendalaId || !$statusId) {
                 $failed++;
@@ -446,6 +476,7 @@ class EtlService
                 '_wo_id'                 => $woId,
                 'wo_id'                  => $woId,
                 'odp'                    => $row['odp']                   ?? null,
+
                 'odc'                    => $row['odc']                   ?? null,
                 'gpon'                   => $row['gpon']                  ?? null,
                 'feeder'                 => $row['feeder']                ?? null,
@@ -498,21 +529,23 @@ class EtlService
             ];
 
             $factKendalaRows[] = [
-                '_wo_id'                   => $woId,
-                'wo_id'                    => $woId,
-                'date_id'                  => $dateId,
-                'sto_id'                   => $stoId,
-                'kendala_id'               => $kendalaId,
-                'dim_kendala_id'           => $kendalaId,
-                'jumlah_kendala'           => (int) ($row['jumlah_kendala'] ?? 1),
-                'hasil_solusi_maintenance' => $row['hasil_solusi_maintenance'] ?? null,
-                'hasil_solusi_optima'      => $row['hasil_solusi_optima']      ?? null,
-                'hasil_solusi_sdi'         => $row['hasil_solusi_sdi']         ?? null,
-                'total_eskalasi'           => (int) ($row['total_eskalasi']    ?? 0),
-                'durasi_grup_pengerjaan'   => $this->parseDecimal($row['durasi_grup_pengerjaan'] ?? null),
-                'created_at'               => $now,
-                'updated_at'               => $now,
+                '_wo_id'                 => $woId,
+                'date_id'                => $dateId,
+                'sto_id'                 => $stoId,
+                'kendala_id'             => $kendalaId,
+                'dim_kendala_id'         => $kendalaId,
+                'dim_teknisi_id'         => $teknisiId,
+                'dim_status_id'          => $statusId,
+
+                // mapping result - sesuai kolom yang ada di migration
+                'keterangan'             => $row['keterangan'] ?? null,
+                'resolusi_jam'           => $this->parseDecimal($row['resolusi_jam'] ?? null),
+                'root_cause'             => $row['root_cause'] ?? null,
+
+                'created_at'             => $now,
+                'updated_at'             => $now,
             ];
+
 
             $existingWoIds[$woId] = true;
             $success++;
@@ -525,17 +558,25 @@ class EtlService
         try {
             DB::beginTransaction();
 
-            // Insert dim_infrastruktur (strip temp _wo_id)
+            // Insert dim_infrastruktur + isi wo_id agar bisa di-map cepat ke fact_kendalateknis
+
+            // Insert dim_infrastruktur
+
             $infraData = array_map(function ($r) {
-                unset($r['_wo_id']); return $r;
+                // strip temp key
+                unset($r['_wo_id']);
+                unset($r['wo_id']); // dim_infrastruktur memang tidak punya kolom ini
+                return $r;
             }, $infraInserts);
 
-            foreach (array_chunk($infraData, 200) as $chunk) {
+            // chunk besar untuk mengurangi jumlah statement insert
+            foreach (array_chunk($infraData, 2000) as $chunk) {
                 DB::table('dim_infrastruktur')->insert($chunk);
             }
 
-            // Ambil infra_id hasil insert
-            $woIds    = array_column($infraInserts, '_wo_id');
+
+            // Map infra_id berdasarkan wo_id (kolom wo_id sudah ditambahkan via migration)
+            $woIds = array_values(array_unique(array_column($infraInserts, '_wo_id')));
             $infraMap = DB::table('dim_infrastruktur')
                 ->whereIn('wo_id', $woIds)
                 ->pluck('infra_id', 'wo_id')
@@ -543,18 +584,25 @@ class EtlService
 
             // Inject infra_id ke fact_kendalateknis
             foreach ($factKendalaRows as &$fk) {
-                $fk['infra_id']             = $infraMap[$fk['_wo_id']] ?? null;
+                $fk['infra_id'] = $infraMap[$fk['_wo_id']] ?? null;
                 $fk['dim_infrastruktur_id'] = $fk['infra_id'];
                 unset($fk['_wo_id']);
             }
             unset($fk);
 
-            foreach (array_chunk($factWoRows, 200) as $chunk) {
+
+            // Bulk insert: naikkan chunk supaya jumlah statement INSERT turun
+            // (lebih sedikit statement => biasanya lebih cepat saat ada FK/index checks)
+            $factChunkSize = 5000;
+
+            foreach (array_chunk($factWoRows, $factChunkSize) as $chunk) {
                 DB::table('fact_workorder')->insert($chunk);
             }
-            foreach (array_chunk($factKendalaRows, 200) as $chunk) {
+            foreach (array_chunk($factKendalaRows, $factChunkSize) as $chunk) {
                 DB::table('fact_kendalateknis')->insert($chunk);
             }
+
+
 
             DB::commit();
 
