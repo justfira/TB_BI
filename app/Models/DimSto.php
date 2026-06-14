@@ -23,6 +23,6 @@ class DimSto extends Model
 
     public function factWorkorders()
     {
-        return $this->hasMany(FactWorkorder::class, 'dim_sto_id');
+        return $this->hasMany(FactWorkorder::class, 'sto_id', 'sto_id');
     }
 }

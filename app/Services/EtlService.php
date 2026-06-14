@@ -20,6 +20,7 @@ class EtlService
     protected array $cacheWaktu     = [];
     protected array $cacheTeknisi   = [];
     protected array $cachePelanggan = [];
+    protected bool $cachePelangganFull = false;
 
     // ─── Hapus data ETL ──────────────────────────────────────────────────────
 
@@ -129,52 +130,51 @@ class EtlService
         }
 
         $total = $success = $failed = $duplicate = 0;
+        $batchSize = 500;
+        $batch = [];
+        $lastUpdateTotal = 0;
+        $existingWoIds = [];
+        $now = now()->toDateTimeString();
 
         try {
-            // Fast path: DB-side ETL via stored procedure.
-            // staging_workorder tidak punya log_id, jadi bersihkan staging dulu.
-            DB::table('staging_workorder')->truncate();
-
-            $stagingBatch     = [];
-            $stagingChunkSize = 2000;
-            $lastUpdateTotal  = 0;
+            $this->warmCachesLite();
 
             foreach ($this->importer->rowGenerator($filePath, $manualMapping) as $row) {
                 $total++;
+                $batch[] = $row;
 
-                $stagingBatch[] = [
-                    'data_json'  => $row,
-                    'status'     => 'pending',
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ];
-
-                if (count($stagingBatch) >= $stagingChunkSize) {
-                    DB::table('staging_workorder')->insert($stagingBatch);
-                    $stagingBatch = [];
+                if (count($batch) >= $batchSize) {
+                    [$bS, $fS, $dS] = $this->processBatch($batch, $existingWoIds, $log->id, $now);
+                    $success   += $bS;
+                    $failed    += $fS;
+                    $duplicate += $dS;
+                    $batch = [];
 
                     if ($total - $lastUpdateTotal >= 500) {
                         DB::table('etl_logs')->where('id', $log->id)->update([
-                            'total_rows' => $total,
-                            'updated_at' => now(),
+                            'total_rows'    => $total,
+                            'success_count' => $success,
+                            'failed_count'  => $failed,
+                            'duplicate_count' => $duplicate,
+                            'updated_at'    => now(),
                         ]);
                         $lastUpdateTotal = $total;
                     }
                 }
             }
 
-            if (!empty($stagingBatch)) {
-                DB::table('staging_workorder')->insert($stagingBatch);
+            if (!empty($batch)) {
+                [$bS, $fS, $dS] = $this->processBatch($batch, $existingWoIds, $log->id, $now);
+                $success   += $bS;
+                $failed    += $fS;
+                $duplicate += $dS;
             }
-
-            // Jalankan transformasi set-based di DB
-            DB::unprepared('CALL sp_etl_workorder(' . (int) $log->id . ')');
 
             DB::table('etl_logs')->where('id', $log->id)->update([
                 'total_rows'      => $total,
-                'success_count'   => $total,
-                'failed_count'    => 0,
-                'duplicate_count' => 0,
+                'success_count'   => $success,
+                'failed_count'    => $failed,
+                'duplicate_count' => $duplicate,
                 'status'          => 'done',
                 'updated_at'      => now(),
             ]);
@@ -195,6 +195,116 @@ class EtlService
         }
 
         return $log->fresh();
+    }
+
+    protected function processBatch(array $batch, array &$existingWoIds, int $etlLogId, string $now): array
+    {
+        $tanggals      = [];
+        $stoNames      = [];
+        $statusNames   = [];
+        $kendalaNames  = [];
+        $niks          = [];
+        $kContacts     = [];
+        $uniquePelanggan = [];
+
+        foreach ($batch as $row) {
+            $tanggal      = $this->parseDate($row['tanggal'] ?? null);
+            $sto          = trim($row['sto'] ?? 'UNKNOWN');
+            $status       = trim($row['status_wo'] ?? $row['status'] ?? 'UNKNOWN');
+            $kendala      = trim($row['kendala_pt1'] ?? 'UNKNOWN');
+            $nik          = trim($row['nik_teknisi'] ?? '') ?: 'UNKNOWN';
+            $kContact     = trim($row['track_id'] ?? $row['wo_sc_id'] ?? 'UNKNOWN');
+
+            if ($tanggal) {
+                $tanggals[$tanggal] = true;
+            }
+            if ($sto !== '') {
+                $stoNames[$sto] = true;
+            }
+            if ($status !== '') {
+                $statusNames[$status] = true;
+            }
+            if ($kendala !== '') {
+                $kendalaNames[$kendala] = true;
+            }
+            if ($nik !== '') {
+                $niks[$nik] = true;
+            }
+            if ($kContact !== '') {
+                $kContacts[$kContact] = true;
+                $uniquePelanggan[$kContact] = $row;
+            }
+        }
+
+        $this->bulkUpsertWaktu(array_keys($tanggals), $now);
+        $this->bulkUpsertSto(array_keys($stoNames), $now);
+        $this->bulkUpsertStatus(array_keys($statusNames), $now);
+        $this->bulkUpsertKendala($kendalaNames, $batch, $now);
+        $this->bulkUpsertTeknisi($niks, $batch, $now);
+        $this->bulkUpsertPelanggan($uniquePelanggan, $now);
+
+        $this->prefetchPelangganCache($kContacts);
+        $this->prefetchExistingWorkOrderIds($batch, $existingWoIds);
+
+        return $this->flushFactsBatch($batch, $existingWoIds, $now, $etlLogId);
+    }
+
+    protected function prefetchExistingWorkOrderIds(array $batch, array &$existingWoIds): void
+    {
+        $woIds = [];
+        foreach ($batch as $row) {
+            $woScId = trim($row['wo_sc_id'] ?? '');
+            if ($woScId !== '') {
+                $woIds[$woScId] = true;
+            }
+        }
+
+        if (empty($woIds)) {
+            return;
+        }
+
+        $existing = $this->getExistingWorkOrderIds(array_keys($woIds));
+        $existingWoIds += $existing;
+    }
+
+    protected function getExistingWorkOrderIds(array $woIds): array
+    {
+        if (empty($woIds)) {
+            return [];
+        }
+
+        $existing = [];
+        foreach (array_chunk(array_unique($woIds), 1000) as $chunk) {
+            $existing += DB::table('fact_workorder')
+                ->whereIn('wo_sc_id', $chunk)
+                ->pluck('wo_sc_id')
+                ->flip()
+                ->all();
+        }
+
+        return $existing;
+    }
+
+    protected function prefetchPelangganCache(array $kContacts): void
+    {
+        if ($this->cachePelangganFull || empty($kContacts)) {
+            return;
+        }
+
+        $missing = array_filter(array_unique($kContacts), fn($contact) => $contact !== '' && !isset($this->cachePelanggan[$contact]));
+        if (empty($missing)) {
+            return;
+        }
+
+        $found = [];
+        foreach (array_chunk($missing, 1000) as $chunk) {
+            $found += DB::table('dim_pelanggan')
+                ->whereIn('k_contact', $chunk)
+                ->pluck('id', 'k_contact')
+                ->all();
+        }
+
+        $this->cachePelanggan += $found;
     }
 
     // ─── Bulk upsert dimensi ─────────────────────────────────────────────────
@@ -224,6 +334,8 @@ class EtlService
             foreach (array_chunk($toInsert, 500) as $chunk) {
                 DB::table('dim_waktu')->insertOrIgnore($chunk);
             }
+            $newCache = DB::table('dim_waktu')->whereIn('tanggal', array_keys($tanggals))->pluck('id', 'tanggal')->all();
+            $this->cacheWaktu += $newCache;
         }
     }
 
@@ -246,6 +358,8 @@ class EtlService
             foreach (array_chunk($toInsert, 500) as $chunk) {
                 DB::table('dim_sto')->insertOrIgnore($chunk);
             }
+            $newCache = DB::table('dim_sto')->whereIn('nama_sto', array_keys($stoNames))->pluck('id', 'nama_sto')->all();
+            $this->cacheSto += $newCache;
         }
     }
 
@@ -267,6 +381,13 @@ class EtlService
         if (!empty($toInsert)) {
             foreach (array_chunk($toInsert, 500) as $chunk) {
                 DB::table('dim_status')->insertOrIgnore($chunk);
+            }
+            $newCache = DB::table('dim_status')->whereIn('status_name', array_keys($statusNames))->pluck('id', 'status_name')->all();
+            foreach ($newCache as $statusName => $id) {
+                $this->cacheStatus[$statusName] = [
+                    'id' => $id,
+                    'group' => DimStatus::resolveGroup($statusName),
+                ];
             }
         }
     }
@@ -303,6 +424,8 @@ class EtlService
             foreach (array_chunk($toInsert, 500) as $chunk) {
                 DB::table('dim_kendala')->insertOrIgnore($chunk);
             }
+            $newCache = DB::table('dim_kendala')->whereIn('kendala_pt1', array_keys($uniqueKendala))->pluck('id', 'kendala_pt1')->all();
+            $this->cacheKendala += $newCache;
         }
     }
 
@@ -341,6 +464,8 @@ class EtlService
             foreach (array_chunk($toInsert, 500) as $chunk) {
                 DB::table('dim_teknisi')->insertOrIgnore($chunk);
             }
+            $newCache = DB::table('dim_teknisi')->whereIn('nik_teknisi', array_keys($uniqueTeknisi))->pluck('id', 'nik_teknisi')->all();
+            $this->cacheTeknisi += $newCache;
         }
     }
 
@@ -377,6 +502,8 @@ class EtlService
             foreach (array_chunk($toInsert, 500) as $chunk) {
                 DB::table('dim_pelanggan')->insertOrIgnore($chunk);
             }
+            $newCache = DB::table('dim_pelanggan')->whereIn('k_contact', array_keys($uniquePelanggan))->pluck('id', 'k_contact')->all();
+            $this->cachePelanggan += $newCache;
         }
     }
 
@@ -396,10 +523,17 @@ class EtlService
         $this->cacheWaktu    = DB::table('dim_waktu')->pluck('id', 'tanggal')->all();
         $this->cacheTeknisi  = DB::table('dim_teknisi')->pluck('id', 'nik_teknisi')->all();
 
-        $this->cachePelanggan = DB::table('dim_pelanggan')
-            ->whereNotNull('k_contact')
-            ->pluck('id', 'k_contact')
-            ->all();
+        $pelangganCount = DB::table('dim_pelanggan')->count();
+        if ($pelangganCount <= 100_000) {
+            $this->cachePelanggan = DB::table('dim_pelanggan')
+                ->whereNotNull('k_contact')
+                ->pluck('id', 'k_contact')
+                ->all();
+            $this->cachePelangganFull = true;
+        } else {
+            $this->cachePelanggan = [];
+            $this->cachePelangganFull = false;
+        }
     }
 
     // ─── Flush 1000 baris ke fact tables ─────────────────────────────────────
@@ -410,10 +544,13 @@ class EtlService
         $validRows    = [];
         $infraInserts = [];
 
+        $batchSeen = [];
         foreach ($batch as $row) {
             $woScId = trim($row['wo_sc_id'] ?? '');
             if (empty($woScId)) continue;
             if (isset($existingWoIds[$woScId])) { $duplicate++; continue; }
+            if (isset($batchSeen[$woScId])) { $duplicate++; continue; }
+            $batchSeen[$woScId] = true;
 
             $tanggal    = $this->parseDate($row['tanggal'] ?? null) ?? now()->toDateString();
             $stoName    = trim($row['sto'] ?? 'UNKNOWN');
@@ -439,28 +576,30 @@ class EtlService
             $isSla      = ($statusInfo['group'] ?? '') === DimStatus::GROUP_SELESAI;
             $isWorkfail = $this->parseFlag($row['unsc'] ?? $row['is_unsc'] ?? null);
 
-            $validRows[]    = compact('woScId', 'waktuId', 'stoId', 'teknisiId', 'pelId', 'kendalaId', 'statusId', 'isSla', 'isWorkfail', 'row');
-            $infraInserts[] = [
-                '_wo_sc_id'             => $woScId,
-                'wo_id'                 => $woScId,
-                'etl_log_id'            => $etlLogId,
-                'odp'                   => $row['odp']                   ?? null,
-                'odc'                   => $row['odc']                   ?? null,
-                'gpon'                  => $row['gpon']                  ?? null,
-                'feeder'                => $row['feeder']                ?? null,
-                'distribusi'            => $row['distribusi']            ?? null,
-                'core_distribusi'       => $row['distribusi']            ?? null,
-                'datek1'                => $row['datek1']                ?? null,
-                'datek_inputan'         => $row['datek_inputan']         ?? null,
-                'datek_real'            => $row['datek_real']            ?? null,
-                'base_tray_odc'         => $row['base_tray_odc']         ?? null,
-                'port_base_tray_odc'    => $row['port_base_tray_odc']    ?? null,
-                'hasil_ukur_odp'        => $row['hasil_ukur_odp']        ?? null,
-                'hasil_ukur_distribusi' => $row['hasil_ukur_distribusi'] ?? null,
-                'hasil_ukur_feeder'     => $row['hasil_ukur_feeder']     ?? null,
-                'created_at'            => $now,
-                'updated_at'            => $now,
-            ];
+            $validRows[] = compact('woScId', 'waktuId', 'stoId', 'teknisiId', 'pelId', 'kendalaId', 'statusId', 'isSla', 'isWorkfail', 'row');
+            if (!isset($infraInserts[$woScId])) {
+                $infraInserts[$woScId] = [
+                    '_wo_sc_id'             => $woScId,
+                    'wo_id'                 => $woScId,
+                    'etl_log_id'            => $etlLogId,
+                    'odp'                   => $row['odp']                   ?? null,
+                    'odc'                   => $row['odc']                   ?? null,
+                    'gpon'                  => $row['gpon']                  ?? null,
+                    'feeder'                => $row['feeder']                ?? null,
+                    'distribusi'            => $row['distribusi']            ?? null,
+                    'core_distribusi'       => $row['distribusi']            ?? null,
+                    'datek1'                => $row['datek1']                ?? null,
+                    'datek_inputan'         => $row['datek_inputan']         ?? null,
+                    'datek_real'            => $row['datek_real']            ?? null,
+                    'base_tray_odc'         => $row['base_tray_odc']         ?? null,
+                    'port_base_tray_odc'    => $row['port_base_tray_odc']    ?? null,
+                    'hasil_ukur_odp'        => $row['hasil_ukur_odp']        ?? null,
+                    'hasil_ukur_distribusi' => $row['hasil_ukur_distribusi'] ?? null,
+                    'hasil_ukur_feeder'     => $row['hasil_ukur_feeder']     ?? null,
+                    'created_at'            => $now,
+                    'updated_at'            => $now,
+                ];
+            }
 
             $existingWoIds[$woScId] = true;
         }

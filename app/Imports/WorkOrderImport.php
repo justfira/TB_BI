@@ -275,6 +275,18 @@ class WorkOrderImport
     }
 
     /**
+     * Bangun header map (colIndex => canonical) tanpa membaca seluruh file.
+     * Dipakai ProcessEtlJob untuk meneruskan mapping ke Python loader.
+     */
+    public function buildHeaderMap(UploadedFile|string $file, array $manualMapping = []): array
+    {
+        $path = $file instanceof UploadedFile ? $file->getRealPath() : $file;
+        [$headerMap] = $this->readHeaderAndPreview($path, $manualMapping, 0);
+
+        return $headerMap;
+    }
+
+    /**
      * Generator: yield satu baris per iterasi — true streaming, memori konstan.
      */
     public function rowGenerator(UploadedFile|string $file, array $manualMapping = []): \Generator

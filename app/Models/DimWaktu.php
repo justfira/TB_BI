@@ -25,6 +25,6 @@ class DimWaktu extends Model
 
     public function factWorkorders()
     {
-        return $this->hasMany(FactWorkorder::class, 'dim_waktu_id');
+        return $this->hasMany(FactWorkorder::class, 'date_id', 'date_id');
     }
 }

@@ -27,6 +27,6 @@ class DimPelanggan extends Model
 
     public function factWorkorders()
     {
-        return $this->hasMany(FactWorkorder::class, 'dim_pelanggan_id');
+        return $this->hasMany(FactWorkorder::class, 'pelanggan_id', 'pelanggan_id');
     }
 }

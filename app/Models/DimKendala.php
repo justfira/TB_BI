@@ -22,7 +22,7 @@ class DimKendala extends Model
 
     public function factWorkorders()
     {
-        return $this->hasMany(FactWorkorder::class, 'dim_kendala_id');
+        return $this->hasMany(FactWorkorder::class, 'kendala_id', 'kendala_id');
     }
 
     public function factKendalateknis()

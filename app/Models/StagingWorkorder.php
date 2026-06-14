@@ -13,7 +13,7 @@ class StagingWorkorder extends Model
 
     protected $fillable = [
         'data_json',
-        'status',
+        'status_etl',
         'errors',
         'row_number',
     ];

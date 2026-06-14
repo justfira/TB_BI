@@ -9,15 +9,15 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('fact_workorder', function (Blueprint $table) {
-            $table->unsignedBigInteger('etl_log_id')->nullable()->after('id')->index();
+            $table->unsignedBigInteger('etl_log_id')->nullable()->after('wo_id')->index();
         });
 
         Schema::table('dim_infrastruktur', function (Blueprint $table) {
-            $table->unsignedBigInteger('etl_log_id')->nullable()->after('id')->index();
+            $table->unsignedBigInteger('etl_log_id')->nullable()->after('infra_id')->index();
         });
 
         Schema::table('fact_kendalateknis', function (Blueprint $table) {
-            $table->unsignedBigInteger('etl_log_id')->nullable()->after('id')->index();
+            $table->unsignedBigInteger('etl_log_id')->nullable()->after('kendala_teknis_id')->index();
         });
     }
 

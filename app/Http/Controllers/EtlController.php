@@ -25,9 +25,9 @@ class EtlController extends Controller
 
     public function showImport()
     {
-        $pendingCount   = StagingWorkorder::where('status', 'pending')->count();
-        $processedCount = StagingWorkorder::where('status', 'processed')->count();
-        $failedCount    = StagingWorkorder::where('status', 'failed')->count();
+        $pendingCount   = StagingWorkorder::where('status_etl', 'pending')->count();
+        $processedCount = StagingWorkorder::where('status_etl', 'processed')->count();
+        $failedCount    = StagingWorkorder::where('status_etl', 'failed')->count();
 
         $etlLogs = EtlLog::latest('imported_at')->paginate(10);
 
@@ -145,10 +145,22 @@ class EtlController extends Controller
             'duplicate_count' => 0,
         ]);
 
-        // Dispatch ke background queue
-        // File TIDAK dihapus di sini — ProcessEtlJob yang hapus setelah selesai
-        ProcessEtlJob::dispatch($fullPath, $manualMapping, $log->id)
-            ->onQueue('etl');
+        try {
+            if (app()->environment('local')) {
+                ProcessEtlJob::dispatchSync($fullPath, $manualMapping, $log->id);
+            } else {
+                ProcessEtlJob::dispatch($fullPath, $manualMapping, $log->id)
+                    ->onQueue('etl');
+            }
+        } catch (\Throwable $e) {
+            $log->update([
+                'status'        => 'error',
+                'error_message' => substr($e->getMessage(), 0, 1000),
+            ]);
+
+            return redirect()->route('import.result', $log->id)
+                ->with('error', 'ETL gagal: ' . $e->getMessage());
+        }
 
         return redirect()->route('import.result', $log->id);
     }
@@ -159,7 +171,7 @@ class EtlController extends Controller
     {
         $log = EtlLog::findOrFail($logId);
 
-        $failedRows = StagingWorkorder::where('status', 'failed')
+        $failedRows = StagingWorkorder::where('status_etl', 'failed')
             ->where('created_at', '>=', $log->imported_at)
             ->limit(50)
             ->get();
@@ -200,7 +212,7 @@ class EtlController extends Controller
             'is_done'         => in_array($log->status, ['done', 'error']),
         ];
 
-        cache()->put($cacheKey, $payload, now()->addSeconds(2));
+        cache()->put($cacheKey, $payload, now()->addSeconds(5));
 
         return response()->json($payload);
     }

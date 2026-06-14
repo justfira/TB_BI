@@ -26,7 +26,7 @@ class DimTeknisi extends Model
 
     public function factWorkorders()
     {
-        return $this->hasMany(FactWorkorder::class, 'dim_teknisi_id');
+        return $this->hasMany(FactWorkorder::class, 'teknisi_id', 'teknisi_id');
     }
 
     public function factKendalateknis()
