@@ -10,6 +10,7 @@ Route::get('/', fn() => redirect()->route('dashboard.index'));
 
 // ── Dashboard BI ──────────────────────────────────────────────────────────────
 Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard.index');
+Route::get('/analysis', fn() => view('analysis.index'))->name('analysis.index');
 
 // ── Import / ETL ──────────────────────────────────────────────────────────────
 
@@ -30,4 +31,3 @@ Route::prefix('reports')->name('reports.')->group(function () {
     Route::get('/export/excel', [ReportController::class, 'exportExcel'])->name('export.excel');
     Route::get('/export/pdf',   [ReportController::class, 'exportPdf'])->name('export.pdf');
 });
-

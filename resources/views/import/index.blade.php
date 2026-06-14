@@ -23,6 +23,41 @@
 @endif
 
 <div class="row g-4">
+    {{-- Sidebar Info --}}
+    <div class="col-lg-5 d-flex flex-column gap-4">
+        {{-- Panduan --}}
+        <div class="card panel-card">
+            <div class="card-header">Panduan Upload</div>
+            <div class="card-body">
+                <ol class="ps-3 mb-0 small text-muted" style="line-height:2">
+                    <li>Pilih atau drag file Excel (.xlsx/.xls)</li>
+                    <li>Klik <strong>Preview Data</strong> untuk cek header</li>
+                    <li>Perbaiki mapping jika ada header tidak dikenali</li>
+                    <li>Klik <strong>Proses ETL</strong> untuk simpan ke database</li>
+                    <li>Lihat hasil ringkasan &amp; error di halaman hasil</li>
+                </ol>
+            </div>
+        </div>
+
+        {{-- Status ETL --}}
+        <div class="card panel-card">
+            <div class="card-header">Status Staging ETL</div>
+            <div class="card-body status-box">
+                <div class="status-item">
+                    <span>Pending</span>
+                    <strong class="text-warning">{{ number_format($pendingCount ?? 0) }}</strong>
+                </div>
+                <div class="status-item">
+                    <span>Processed</span>
+                    <strong class="text-success">{{ number_format($processedCount ?? 0) }}</strong>
+                </div>
+                <div class="status-item">
+                    <span>Failed</span>
+                    <strong class="text-danger">{{ number_format($failedCount ?? 0) }}</strong>
+                </div>
+            </div>
+        </div>
+    </div>
     {{-- ── Form Upload ─────────────────────────────────────────────────── --}}
     <div class="col-lg-7">
         <div class="card panel-card h-100">
@@ -77,6 +112,7 @@
             </div>
         </div>
     </div>
+</div>
 
 {{-- ── Histori Proses ETL ───────────────────────────────────────── --}}
 <div class="card panel-card mt-4">
@@ -159,44 +195,6 @@
     </div>
 </div>
 
-{{-- ── Sidebar Info ────────────────────────────────────────────────── --}}
-    <div class="col-lg-5 d-flex flex-column gap-4">
-
-
-        {{-- Status ETL --}}
-        <div class="card panel-card">
-            <div class="card-header">Status Staging ETL</div>
-            <div class="card-body status-box">
-                <div class="status-item">
-                    <span>Pending</span>
-                    <strong class="text-warning">{{ number_format($pendingCount ?? 0) }}</strong>
-                </div>
-                <div class="status-item">
-                    <span>Processed</span>
-                    <strong class="text-success">{{ number_format($processedCount ?? 0) }}</strong>
-                </div>
-                <div class="status-item">
-                    <span>Failed</span>
-                    <strong class="text-danger">{{ number_format($failedCount ?? 0) }}</strong>
-                </div>
-            </div>
-        </div>
-
-        {{-- Panduan --}}
-        <div class="card panel-card">
-            <div class="card-header">Panduan Upload</div>
-            <div class="card-body">
-                <ol class="ps-3 mb-0 small text-muted" style="line-height:2">
-                    <li>Pilih atau drag file Excel (.xlsx/.xls)</li>
-                    <li>Klik <strong>Preview Data</strong> untuk cek header</li>
-                    <li>Perbaiki mapping jika ada header tidak dikenali</li>
-                    <li>Klik <strong>Proses ETL</strong> untuk simpan ke database</li>
-                    <li>Lihat hasil ringkasan &amp; error di halaman hasil</li>
-                </ol>
-            </div>
-        </div>
-    </div>
-</div>
 @endsection
 
 @push('scripts')

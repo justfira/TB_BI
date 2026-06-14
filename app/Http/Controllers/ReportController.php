@@ -17,9 +17,10 @@ class ReportController extends Controller
 
         $this->applyFilters($query, $request);
 
-        $reports = $query->latest('wo_id')->paginate(20)->withQueryString();
+        $totalRows = (clone $query)->count();
+        $reports   = $query->latest('wo_id')->paginate(20)->withQueryString();
 
-        return view('reports.index', compact('reports'));
+        return view('reports.index', compact('reports', 'totalRows'));
     }
 
     public function exportExcel(Request $request)

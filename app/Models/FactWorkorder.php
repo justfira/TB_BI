@@ -61,6 +61,11 @@ class FactWorkorder extends Model
         return $this->belongsTo(DimStatus::class, 'status_id', 'status_id');
     }
 
+    public function infrastruktur(): BelongsTo
+    {
+        return $this->belongsTo(DimInfrastruktur::class, 'wo_sc_id', 'wo_id');
+    }
+
     public function kendalaTeknis(): \Illuminate\Database\Eloquent\Relations\HasOne
     {
         return $this->hasOne(FactKendalateknis::class, 'wo_id', 'wo_id');
