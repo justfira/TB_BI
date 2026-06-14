@@ -27,7 +27,11 @@ class ProcessEtlJob implements ShouldQueue
 
     public function handle(WorkOrderImport $importer): void
     {
-        EtlLog::where('id', $this->logId)->update(['status' => 'running']);
+        EtlLog::where('id', $this->logId)->update([
+            'status'        => 'running',
+            'error_message' => null,
+            'errors'        => null,
+        ]);
 
         $mappingPath = storage_path('app/etl_mapping_' . uniqid('', true) . '.json');
 
@@ -82,7 +86,11 @@ class ProcessEtlJob implements ShouldQueue
                 }
             });
 
-            EtlLog::where('id', $this->logId)->update(['status' => 'done']);
+            // The stored procedure owns the final ETL status and counters.
+            // Only fill "done" when it left the row in the running state.
+            EtlLog::where('id', $this->logId)
+                ->where('status', 'running')
+                ->update(['status' => 'done']);
         } catch (ProcessFailedException $e) {
             $output = trim($e->getProcess()->getErrorOutput() . "\n" . $e->getProcess()->getOutput());
             EtlLog::where('id', $this->logId)->update([

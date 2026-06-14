@@ -185,8 +185,9 @@ def _map_row(values: Sequence[Any], column_mapping: Dict[int, str]) -> Optional[
     for field in DATE_FIELDS:
         if field in raw or field == "tanggal_komitmen":
             parsed = _parse_date(row.get(field) if field != "tanggal_komitmen" else raw.get("tanggal_komitmen_ps_completed") or row.get("tanggal_komitmen"))
-            if parsed:
-                row[field] = parsed
+            # Invalid/zero Excel dates must become SQL NULL. Keeping the raw
+            # value here allowed strings such as "0000-00-00" into staging.
+            row[field] = parsed
     for field in DECIMAL_FIELDS:
         if row.get(field) is not None:
             row[field] = _parse_decimal(row.get(field))
@@ -352,6 +353,12 @@ def main() -> None:
         sp_t0 = time.perf_counter()
         print(f"CALL sp_etl_workorder({args.log_id})...", flush=True)
         cur.execute("CALL sp_etl_workorder(%s)", (args.log_id,))
+        # Stored procedures may expose one or more result sets even when they
+        # do not SELECT rows explicitly. Consume them before COMMIT so MySQL
+        # Connector does not raise "Unread result found".
+        while cur.nextset():
+            if cur.with_rows:
+                cur.fetchall()
         cnx.commit()
         sp_elapsed = time.perf_counter() - sp_t0
 
